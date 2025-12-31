@@ -1,0 +1,52 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+
+# Firebase
+# firebase.json and .firebaserc should be committed for shared deployment config
+
+#
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# firebase
+firebase.json
+.firebaserc
+
+
+eslint.config.js
+.eslintrc.js
+.eslintrc.cjs
+.eslintrc.json
+.eslintrc.yaml
+.eslintrc.yml
+.eslintrc.toml
+.eslintrc.ts
+.eslintrc.tsx
+.eslintrc.tsx.json
+.eslintrc.tsx.yaml
+.eslintrc.tsx.yml
