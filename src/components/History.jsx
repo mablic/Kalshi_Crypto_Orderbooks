@@ -1,9 +1,12 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useTheme, themeConfig } from '../theme/theme';
 
 const History = ({ historicalTrades = [], initialBalance = 100000, loading = false, positionStats = null, candleData = [] }) => {
   const { theme } = useTheme();
   const colors = themeConfig[theme];
+  const [currentPage, setCurrentPage] = useState(1);
+  const tradesPerPage = 20;
+
 
   // Pair trades (BUY followed by SELL = 1 complete trade)
   // Also identify unpaired trades as open positions
@@ -27,17 +30,25 @@ const History = ({ historicalTrades = [], initialBalance = 100000, loading = fal
       // Check if this is a BUY entry
       if (entry.trade_position === 'BUY') {
         // Look for the next SELL entry
-        const exit = historicalTrades[i + 1];
-        
+      const exit = historicalTrades[i + 1];
+      
         if (exit && exit.trade_position === 'SELL' && exit.date && exit.price) {
           // Found a complete pair
-          pairs.push({
-            entryDate: entry.date,
-            entryPrice: entry.price,
-            exitDate: exit.date,
-            exitPrice: exit.price,
+          // Calculate PnL manually to verify
+          const entryPrice = parseFloat(entry.price) || 0;
+          const exitPrice = parseFloat(exit.price) || 0;
+          const tradeSize = positionStats?.tradeSize || 100;
+          const calculatedPnL = (exitPrice - entryPrice) * tradeSize;
+          const backendPnL = exit.realized_pnl || exit.realizedPnl || 0;
+          
+        pairs.push({
+          entryDate: entry.date,
+          entryPrice: entryPrice,
+          exitDate: exit.date,
+          exitPrice: exitPrice,
             type: 'LONG',
-            pnl: exit.realized_pnl || 0,
+          // Use calculated PnL if backend PnL seems wrong, otherwise use backend
+          pnl: Math.abs(calculatedPnL - backendPnL) > 10 ? calculatedPnL : backendPnL,
             status: 'CLOSED',
           });
           i += 2; // Skip both entry and exit
@@ -69,7 +80,7 @@ const History = ({ historicalTrades = [], initialBalance = 100000, loading = fal
     }
     
     return { pairedTrades: pairs, unpairedTrades: unpaired };
-  }, [historicalTrades]);
+  }, [historicalTrades, positionStats]);
 
   // Get open positions from unpaired trades and current position stats
   const openPositions = useMemo(() => {
@@ -167,26 +178,71 @@ const History = ({ historicalTrades = [], initialBalance = 100000, loading = fal
     return openTrades;
   }, [unpairedTrades, positionStats, candleData]);
 
+  // Combine all trades (open and closed) into a single sorted list
+  const allTrades = useMemo(() => {
+    const combined = [];
+    
+    // Add closed trades with CLOSED status
+    if (pairedTrades && Array.isArray(pairedTrades)) {
+      pairedTrades.forEach((trade) => {
+        combined.push({
+          ...trade,
+          status: 'CLOSED',
+        });
+      });
+    }
+    
+    // Add open positions with OPEN status
+    if (openPositions && Array.isArray(openPositions)) {
+      openPositions.forEach((trade) => {
+        combined.push({
+          ...trade,
+          status: 'OPEN',
+        });
+      });
+    }
+    
+    // Sort by entry date (most recent first)
+    combined.sort((a, b) => {
+      const dateA = new Date(a.entryDate).getTime();
+      const dateB = new Date(b.entryDate).getTime();
+      return dateB - dateA; // Most recent first
+    });
+    
+    return combined;
+  }, [pairedTrades, openPositions]);
+
+  // Pagination calculations
+  const totalPages = Math.ceil(allTrades.length / tradesPerPage);
+  const startIndex = (currentPage - 1) * tradesPerPage;
+  const endIndex = startIndex + tradesPerPage;
+  const paginatedTrades = allTrades.slice(startIndex, endIndex);
+
+  // Reset to page 1 when trades change
+  React.useEffect(() => {
+    setCurrentPage(1);
+  }, [allTrades.length]);
+
   // Calculate cumulative PnL progression
   const cumulativePnLProgression = useMemo(() => {
     try {
-      const progression = [{ tradeNum: 0, cumulativePnL: 0, exitDate: new Date().toISOString() }];
-      let runningPnL = 0;
-      
+    const progression = [{ tradeNum: 0, cumulativePnL: 0, exitDate: new Date().toISOString() }];
+    let runningPnL = 0;
+    
       if (pairedTrades && Array.isArray(pairedTrades)) {
-        pairedTrades.forEach((trade, index) => {
+    pairedTrades.forEach((trade, index) => {
           if (trade && typeof trade.pnl === 'number') {
-            runningPnL += trade.pnl;
-            progression.push({
-              tradeNum: index + 1,
-              cumulativePnL: runningPnL,
+      runningPnL += trade.pnl;
+      progression.push({
+        tradeNum: index + 1,
+        cumulativePnL: runningPnL,
               exitDate: trade.exitDate || new Date().toISOString(),
-            });
+      });
           }
-        });
+    });
       }
-      
-      return progression;
+    
+    return progression;
     } catch (error) {
       console.error('Error calculating cumulative PnL progression:', error);
       return [{ tradeNum: 0, cumulativePnL: 0, exitDate: new Date().toISOString() }];
@@ -238,14 +294,24 @@ const History = ({ historicalTrades = [], initialBalance = 100000, loading = fal
     };
   }, [pairedTrades]);
 
-  // Format currency
+  // Format currency with parentheses for negatives
   const formatCurrency = (num) => {
-    return new Intl.NumberFormat('en-US', {
+    const value = num || 0;
+    const formatted = new Intl.NumberFormat('en-US', {
       style: 'currency',
       currency: 'USD',
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
-    }).format(num || 0);
+    }).format(Math.abs(value));
+    
+    return value < 0 ? `(${formatted})` : formatted;
+  };
+
+  // Format percentage with parentheses for negatives
+  const formatPercent = (num) => {
+    const value = parseFloat(num) || 0;
+    const formatted = Math.abs(value).toFixed(2);
+    return value < 0 ? `(${formatted}%)` : `${formatted}%`;
   };
 
   if (loading) {
@@ -281,12 +347,21 @@ const History = ({ historicalTrades = [], initialBalance = 100000, loading = fal
               {(() => {
                 const minPnL = Math.min(0, ...cumulativePnLProgression.map(p => p.cumulativePnL));
                 const maxPnL = Math.max(...cumulativePnLProgression.map(p => p.cumulativePnL));
-                const range = maxPnL - minPnL || 1;
-                return [1, 0.75, 0.5, 0.25, 0].map((ratio) => (
-                  <span key={`y-label-${ratio}`} className={colors.textMuted}>
-                    ${(minPnL + ratio * range).toLocaleString('en-US', { maximumFractionDigits: 0 })}
-                  </span>
-                ));
+                // Add 15% buffer above max and below min for better visualization
+                const buffer = Math.max(Math.abs(maxPnL - minPnL) * 0.15, 100);
+                const adjustedMin = minPnL - buffer;
+                const adjustedMax = maxPnL + buffer;
+                const range = adjustedMax - adjustedMin || 1;
+                return [1, 0.75, 0.5, 0.25, 0].map((ratio) => {
+                  const value = adjustedMin + ratio * range;
+                  const absValue = Math.abs(value);
+                  const formatted = absValue.toLocaleString('en-US', { maximumFractionDigits: 0 });
+                  return (
+                    <span key={`y-label-${ratio}`} className={colors.textMuted}>
+                      {value < 0 ? `($${formatted})` : `$${formatted}`}
+                    </span>
+                  );
+                });
               })()}
             </div>
 
@@ -314,8 +389,12 @@ const History = ({ historicalTrades = [], initialBalance = 100000, loading = fal
                 {(() => {
                   const minPnL = Math.min(0, ...cumulativePnLProgression.map(p => p.cumulativePnL));
                   const maxPnL = Math.max(...cumulativePnLProgression.map(p => p.cumulativePnL));
-                  const range = maxPnL - minPnL || 1;
-                  const zeroY = 260 - ((0 - minPnL) / range) * 260;
+                  // Add 15% buffer above max and below min for better visualization
+                  const buffer = Math.max(Math.abs(maxPnL - minPnL) * 0.15, 100);
+                  const adjustedMin = minPnL - buffer;
+                  const adjustedMax = maxPnL + buffer;
+                  const range = adjustedMax - adjustedMin || 1;
+                  const zeroY = 260 - ((0 - adjustedMin) / range) * 260;
                   return (
                     <line
                       x1="0"
@@ -336,10 +415,14 @@ const History = ({ historicalTrades = [], initialBalance = 100000, loading = fal
                     points={cumulativePnLProgression.map((point, idx) => {
                       const minPnL = Math.min(0, ...cumulativePnLProgression.map(p => p.cumulativePnL));
                       const maxPnL = Math.max(...cumulativePnLProgression.map(p => p.cumulativePnL));
-                      const range = maxPnL - minPnL || 1;
+                      // Add 15% buffer above max and below min for better visualization
+                      const buffer = Math.max(Math.abs(maxPnL - minPnL) * 0.15, 100);
+                      const adjustedMin = minPnL - buffer;
+                      const adjustedMax = maxPnL + buffer;
+                      const range = adjustedMax - adjustedMin || 1;
                       const divisor = cumulativePnLProgression.length - 1 || 1;
                       const x = (idx / divisor) * 1000;
-                      const y = 260 - ((point.cumulativePnL - minPnL) / range) * 260;
+                      const y = 260 - ((point.cumulativePnL - adjustedMin) / range) * 260;
                       return `${x},${y}`;
                     }).join(' ')}
                     fill="none"
@@ -354,10 +437,14 @@ const History = ({ historicalTrades = [], initialBalance = 100000, loading = fal
                 {cumulativePnLProgression.length > 0 && cumulativePnLProgression.map((point, idx) => {
                   const minPnL = Math.min(0, ...cumulativePnLProgression.map(p => p.cumulativePnL));
                   const maxPnL = Math.max(...cumulativePnLProgression.map(p => p.cumulativePnL));
-                  const range = maxPnL - minPnL || 1;
+                  // Add 15% buffer above max and below min for better visualization
+                  const buffer = Math.max(Math.abs(maxPnL - minPnL) * 0.15, 100);
+                  const adjustedMin = minPnL - buffer;
+                  const adjustedMax = maxPnL + buffer;
+                  const range = adjustedMax - adjustedMin || 1;
                   const divisor = cumulativePnLProgression.length - 1 || 1;
                   const x = (idx / divisor) * 1000;
-                  const y = 260 - ((point.cumulativePnL - minPnL) / range) * 260;
+                  const y = 260 - ((point.cumulativePnL - adjustedMin) / range) * 260;
 
                   return (
                     <circle
@@ -441,19 +528,19 @@ const History = ({ historicalTrades = [], initialBalance = 100000, loading = fal
         </div>
         <div className={`${colors.surfaceSecondary} rounded-lg p-4`}>
           <p className={`text-xs ${colors.textMuted} mb-2 font-medium`}>Total PnL</p>
-          <p className={`text-2xl font-bold ${
+          <p className={`text-sm sm:text-base font-bold break-words leading-tight ${
             parseFloat(statistics.totalPnL) >= 0
               ? `${colors.green600} ${colors.green400}`
               : `${colors.red600} ${colors.red400}`
           }`}>
-            {parseFloat(statistics.totalPnL) >= 0 ? '+' : ''}{formatCurrency(statistics.totalPnL)}
+            {formatCurrency(statistics.totalPnL)}
           </p>
         </div>
       </div>
 
       {/* Trades Table */}
       <div className="overflow-x-auto">
-        {pairedTrades.length === 0 && openPositions.length === 0 ? (
+        {allTrades.length === 0 ? (
           <div className={`text-center py-12 ${colors.textMuted}`}>
             No trades yet
           </div>
@@ -473,89 +560,26 @@ const History = ({ historicalTrades = [], initialBalance = 100000, loading = fal
               </tr>
             </thead>
             <tbody>
-              {/* Open Positions First */}
-              {openPositions.map((trade, index) => {
+              {paginatedTrades.map((trade, index) => {
                 const isProfit = trade.pnl > 0;
+                const isOpen = trade.status === 'OPEN';
+                const exitPrice = isOpen ? trade.currentPrice : trade.exitPrice;
                 const returnPercent = trade.entryPrice
-                  ? (((trade.currentPrice - trade.entryPrice) / trade.entryPrice) * 100).toFixed(2)
+                  ? (((exitPrice - trade.entryPrice) / trade.entryPrice) * 100).toFixed(2)
                   : 0;
+                // Calculate the actual trade number (accounting for pagination)
+                const tradeNumber = allTrades.length - (startIndex + index);
 
                 return (
                   <tr
-                    key={`open-${index}`}
-                    className={`border-b ${colors.border} hover:${colors.surfaceSecondary} transition ${colors.blueLight}`}
+                    key={`trade-${startIndex + index}`}
+                    className={`border-b ${colors.border} hover:${colors.surfaceSecondary} transition ${
+                      isOpen ? colors.blueLight : ''
+                    }`}
                   >
-                    <td className={`py-3 px-4 font-medium ${colors.text}`}>OPEN #{index + 1}</td>
-                    <td className={`py-3 px-4`}>
-                      <span
-                        className={`px-3 py-1 rounded-full text-xs font-semibold ${
-                          trade.type === 'LONG'
-                            ? `${colors.blueBadge} ${colors.blue700} ${colors.blue300}`
-                            : `${colors.orangeBadge} ${colors.orange700} ${colors.orange300}`
-                        }`}
-                      >
-                        {trade.type}
-                      </span>
+                    <td className={`py-3 px-4 font-medium ${colors.text}`}>
+                      #{tradeNumber}
                     </td>
-                    <td className={`py-3 px-4 ${colors.text}`}>
-                      {new Date(trade.entryDate).toLocaleDateString('en-US', {
-                        month: 'short',
-                        day: '2-digit',
-                        hour: '2-digit',
-                        minute: '2-digit',
-                      })}
-                    </td>
-                    <td className={`py-3 px-4 ${colors.text}`}>
-                      ${parseFloat(trade.entryPrice).toFixed(2)}
-                    </td>
-                    <td className={`py-3 px-4 ${colors.textMuted}`}>
-                      —
-                    </td>
-                    <td className={`py-3 px-4 ${colors.text}`}>
-                      ${parseFloat(trade.currentPrice).toFixed(2)}
-                    </td>
-                    <td
-                      className={`py-3 px-4 text-right font-bold ${
-                        isProfit
-                          ? `${colors.green600} ${colors.green400}`
-                          : `${colors.red600} ${colors.red400}`
-                      }`}
-                    >
-                      {isProfit ? '+' : ''}{formatCurrency(trade.pnl)}
-                    </td>
-                    <td
-                      className={`py-3 px-4 text-right font-bold ${
-                        parseFloat(returnPercent) >= 0
-                          ? `${colors.green600} ${colors.green400}`
-                          : `${colors.red600} ${colors.red400}`
-                      }`}
-                    >
-                      {parseFloat(returnPercent) >= 0 ? '+' : ''}{returnPercent}%
-                    </td>
-                    <td className={`py-3 px-4 text-center`}>
-                      <span
-                        className={`inline-flex items-center justify-center px-2 py-1 rounded-full text-xs font-semibold ${colors.blueBadge} ${colors.blue600} ${colors.blue300}`}
-                      >
-                        OPEN
-                      </span>
-                    </td>
-                  </tr>
-                );
-              })}
-              
-              {/* Closed Trades */}
-              {pairedTrades.map((trade, index) => {
-                const isProfit = trade.pnl > 0;
-                const returnPercent = trade.entryPrice
-                  ? (((trade.exitPrice - trade.entryPrice) / trade.entryPrice) * 100).toFixed(2)
-                  : 0;
-
-                return (
-                  <tr
-                    key={`trade-${index}`}
-                    className={`border-b ${colors.border} hover:${colors.surfaceSecondary} transition`}
-                  >
-                    <td className={`py-3 px-4 font-medium ${colors.text}`}>#{index + 1}</td>
                     <td className={`py-3 px-4`}>
                       <span
                         className={`px-3 py-1 rounded-full text-xs font-semibold ${
@@ -579,15 +603,19 @@ const History = ({ historicalTrades = [], initialBalance = 100000, loading = fal
                       ${parseFloat(trade.entryPrice).toFixed(2)}
                     </td>
                     <td className={`py-3 px-4 ${colors.text}`}>
-                      {new Date(trade.exitDate).toLocaleDateString('en-US', {
+                      {isOpen ? (
+                        <span className={colors.textMuted}>—</span>
+                      ) : (
+                        new Date(trade.exitDate).toLocaleDateString('en-US', {
                         month: 'short',
                         day: '2-digit',
                         hour: '2-digit',
                         minute: '2-digit',
-                      })}
+                        })
+                      )}
                     </td>
                     <td className={`py-3 px-4 ${colors.text}`}>
-                      ${parseFloat(trade.exitPrice).toFixed(2)}
+                      ${parseFloat(exitPrice).toFixed(2)}
                     </td>
                     <td
                       className={`py-3 px-4 text-right font-bold ${
@@ -596,7 +624,7 @@ const History = ({ historicalTrades = [], initialBalance = 100000, loading = fal
                           : `${colors.red600} ${colors.red400}`
                       }`}
                     >
-                      {isProfit ? '+' : ''}{formatCurrency(trade.pnl)}
+                      {formatCurrency(trade.pnl)}
                     </td>
                     <td
                       className={`py-3 px-4 text-right font-bold ${
@@ -605,9 +633,16 @@ const History = ({ historicalTrades = [], initialBalance = 100000, loading = fal
                           : `${colors.red600} ${colors.red400}`
                       }`}
                     >
-                      {parseFloat(returnPercent) >= 0 ? '+' : ''}{returnPercent}%
+                      {formatPercent(returnPercent)}
                     </td>
                     <td className={`py-3 px-4 text-center`}>
+                      {isOpen ? (
+                        <span
+                          className={`inline-flex items-center justify-center px-2 py-1 rounded-full text-xs font-semibold ${colors.blueBadge} ${colors.blue600} ${colors.blue300}`}
+                        >
+                          OPEN
+                        </span>
+                      ) : (
                       <span
                         className={`inline-flex items-center justify-center w-6 h-6 rounded-full ${
                           isProfit
@@ -617,6 +652,7 @@ const History = ({ historicalTrades = [], initialBalance = 100000, loading = fal
                       >
                         {isProfit ? '✓' : '✕'}
                       </span>
+                      )}
                     </td>
                   </tr>
                 );
@@ -625,6 +661,70 @@ const History = ({ historicalTrades = [], initialBalance = 100000, loading = fal
           </table>
         )}
       </div>
+
+      {/* Pagination Controls */}
+      {allTrades.length > tradesPerPage && (
+        <div className={`mt-6 flex items-center justify-between ${colors.surfaceSecondary} rounded-lg p-4 border ${colors.border}`}>
+          <div className={`text-sm ${colors.textMuted}`}>
+            Showing {startIndex + 1} to {Math.min(endIndex, allTrades.length)} of {allTrades.length} trades
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+              disabled={currentPage === 1}
+              className={`px-4 py-2 rounded-lg text-sm font-semibold transition-all ${
+                currentPage === 1
+                  ? `${colors.surfaceSecondary} ${colors.textMuted} cursor-not-allowed opacity-50`
+                  : `${colors.surface} ${colors.text} border ${colors.border} hover:bg-blue-50 dark:hover:bg-blue-900/20 hover:border-blue-400`
+              }`}
+            >
+              Previous
+            </button>
+            
+            {/* Page Numbers */}
+            <div className="flex items-center gap-1">
+              {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
+                let pageNum;
+                if (totalPages <= 5) {
+                  pageNum = i + 1;
+                } else if (currentPage <= 3) {
+                  pageNum = i + 1;
+                } else if (currentPage >= totalPages - 2) {
+                  pageNum = totalPages - 4 + i;
+                } else {
+                  pageNum = currentPage - 2 + i;
+                }
+                
+                return (
+                  <button
+                    key={pageNum}
+                    onClick={() => setCurrentPage(pageNum)}
+                    className={`w-10 h-10 rounded-lg text-sm font-semibold transition-all ${
+                      currentPage === pageNum
+                        ? `bg-blue-500 text-white shadow-md`
+                        : `${colors.surface} ${colors.text} border ${colors.border} hover:bg-blue-50 dark:hover:bg-blue-900/20 hover:border-blue-400`
+                    }`}
+                  >
+                    {pageNum}
+                  </button>
+                );
+              })}
+            </div>
+
+            <button
+              onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
+              disabled={currentPage === totalPages}
+              className={`px-4 py-2 rounded-lg text-sm font-semibold transition-all ${
+                currentPage === totalPages
+                  ? `${colors.surfaceSecondary} ${colors.textMuted} cursor-not-allowed opacity-50`
+                  : `${colors.surface} ${colors.text} border ${colors.border} hover:bg-blue-50 dark:hover:bg-blue-900/20 hover:border-blue-400`
+              }`}
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Summary Footer */}
       {pairedTrades.length > 0 && (

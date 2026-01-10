@@ -72,9 +72,9 @@ const Footer = () => {
         {/* Bottom Bar */}
         <div className={`pt-6 border-t ${colors.border}`}>
           <div className="flex flex-col md:flex-row justify-between items-center space-y-2 md:space-y-0">
-              <p className={`text-sm ${colors.textMuted}`}>
+            <p className={`text-sm ${colors.textMuted}`}>
                 © {new Date().getFullYear()} AI Auto Trading. All rights reserved.
-              </p>
+            </p>
           </div>
         </div>
       </div>

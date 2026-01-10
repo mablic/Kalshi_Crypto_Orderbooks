@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useTheme, themeConfig } from '../theme/theme';
 import Stock from '../components/Stock';
 import History from '../components/History';
@@ -35,7 +35,7 @@ const Home = () => {
     const loadPositionData = async (showLoading = false) => {
       try {
         if (showLoading) {
-          setLoading(true);
+        setLoading(true);
         }
         const candles = await getCandleData(selectedStrategy);
         const trades = await getHistoricalTrades(selectedStrategy);
@@ -48,7 +48,7 @@ const Home = () => {
         console.error('Error loading position data:', error);
       } finally {
         if (showLoading) {
-          setLoading(false);
+        setLoading(false);
         }
       }
     };
@@ -68,53 +68,87 @@ const Home = () => {
     }
   }, [selectedStrategy]);
 
-  // Format currency
+  // Format currency with parentheses for negatives
   const formatCurrency = (num) => {
-    return new Intl.NumberFormat('en-US', {
+    const value = num || 0;
+    const formatted = new Intl.NumberFormat('en-US', {
       style: 'currency',
       currency: 'USD',
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
-    }).format(num || 0);
+    }).format(Math.abs(value));
+    
+    return value < 0 ? `(${formatted})` : formatted;
   };
 
-  const accountBalance = (positionStats?.initialBalance || 100000) + (positionStats?.realizedPnL || 0);
+  // Use realized_pnl directly from backend
+  const totalRealizedPnL = positionStats?.realizedPnL || positionStats?.realizedPnl || 0;
+  const accountBalance = (positionStats?.initialBalance || 100000) + totalRealizedPnL;
   const pnlChange = accountBalance - (positionStats?.initialBalance || 100000);
+
+  // Helper function to format strategy name for display
+  const formatStrategyName = (name) => {
+    if (!name) return '';
+    // Extract ticker if present (e.g., "LSTM_Strategy_A_AAPL" -> "LSTM Strategy A - AAPL")
+    const parts = name.split('_');
+    if (parts.length >= 3) {
+      const ticker = parts[parts.length - 1];
+      const strategy = parts.slice(0, -1).join(' ').replace(/([A-Z])/g, ' $1').trim();
+      return `${strategy} - ${ticker}`;
+    }
+    return name.replace(/_/g, ' ').trim();
+  };
+
+  // Helper function to get short strategy name for tabs
+  const getShortStrategyName = (name) => {
+    if (!name) return '';
+    const parts = name.split('_');
+    if (parts.length >= 3) {
+      // Return something like "LSTM - AAPL" or "MLP - TSLA"
+      const ticker = parts[parts.length - 1];
+      const strategyType = parts[0]; // LSTM or MLP
+      return `${strategyType} - ${ticker}`;
+    }
+    return name.split('_')[0] || name;
+  };
 
   return (
     <div className={`min-h-screen ${colors.background}`}>
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
-        {/* Summary Section - Base Info */}
-        <div className={`${colors.surface} border ${colors.border} rounded-2xl p-8 shadow-xl mb-8`}>
-          {/* Header with Strategy Selector */}
-          <div className="flex items-start justify-between mb-8">
+        {/* Strategy Tabs - Top Navigation */}
+        {strategies.length > 0 && (
+          <div className={`mb-8 ${colors.surface} border ${colors.border} rounded-2xl p-4 shadow-xl`}>
+            <div className={`flex flex-wrap gap-2 border-b ${colors.border} pb-4 mb-4`}>
+              <span className={`text-xs font-semibold ${colors.textMuted} uppercase tracking-wide self-center mr-2`}>
+                Strategies:
+              </span>
+              {strategies.map((strategy) => (
+                <button
+                  key={strategy.name}
+                  onClick={() => setSelectedStrategy(strategy.name)}
+                  className={`px-4 py-2 rounded-lg font-semibold text-sm transition-all whitespace-nowrap ${
+                    selectedStrategy === strategy.name
+                      ? `bg-blue-500 text-white shadow-md transform scale-105`
+                      : `${colors.surfaceSecondary} ${colors.text} border ${colors.border} hover:bg-blue-50 dark:hover:bg-blue-900/20 hover:border-blue-400`
+                  }`}
+                >
+                  {getShortStrategyName(strategy.name)}
+                </button>
+              ))}
+            </div>
             <div>
-              <h2 className={`text-3xl font-bold ${colors.text}`}>
-                {selectedStrategy}
+              <h2 className={`text-2xl font-bold ${colors.text} mb-1`}>
+                {formatStrategyName(selectedStrategy)}
               </h2>
-              <p className={`text-sm ${colors.textMuted} mt-2`}>
+              <p className={`text-sm ${colors.textMuted}`}>
                 {positionStats?.ticker || 'AAPL'} Trading Strategy | Real-time Performance
               </p>
             </div>
-            
-            {/* Strategy Selector Dropdown */}
-            {strategies.length > 0 && (
-              <div className="flex flex-col gap-2">
-                <label className={`text-xs font-semibold ${colors.textMuted} uppercase tracking-wide`}>Select Strategy</label>
-                <select
-                  value={selectedStrategy}
-                  onChange={(e) => setSelectedStrategy(e.target.value)}
-                  className={`px-4 py-2 rounded-lg text-sm border ${colors.border} ${colors.surface} ${colors.text} focus:outline-none focus:ring-2 focus:ring-blue-500`}
-                >
-                  {strategies.map((strategy) => (
-                    <option key={strategy.name} value={strategy.name}>
-                      {strategy.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            )}
           </div>
+        )}
+
+        {/* Summary Section - Base Info */}
+        <div className={`${colors.surface} border ${colors.border} rounded-2xl p-8 shadow-xl mb-8`}>
 
           {/* Key Metrics - 3 Column Layout */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
@@ -125,15 +159,15 @@ const Home = () => {
                 {formatCurrency(accountBalance)}
               </p>
               <p className={`text-sm ${pnlChange >= 0 ? colors.green600 : colors.red600} ${pnlChange >= 0 ? colors.green400 : colors.red400}`}>
-                {pnlChange >= 0 ? '+' : ''}{formatCurrency(pnlChange)}
+                {formatCurrency(pnlChange)}
               </p>
             </div>
 
-            {/* Realized PnL */}
+            {/* Realized PnL - Total from all closed trades */}
             <div className={`${colors.surfaceSecondary} rounded-xl p-6 border ${colors.border}`}>
               <p className={`text-xs font-semibold ${colors.textMuted} uppercase tracking-wider mb-2`}>Realized PnL</p>
-              <p className={`text-3xl font-bold ${(positionStats?.realizedPnL || 0) >= 0 ? colors.green600 : colors.red600} ${(positionStats?.realizedPnL || 0) >= 0 ? colors.green400 : colors.red400}`}>
-                {formatCurrency(positionStats?.realizedPnL || 0)}
+              <p className={`text-3xl font-bold ${totalRealizedPnL >= 0 ? colors.green600 : colors.red600} ${totalRealizedPnL >= 0 ? colors.green400 : colors.red400}`}>
+                {formatCurrency(totalRealizedPnL)}
               </p>
             </div>
 
@@ -175,7 +209,7 @@ const Home = () => {
           </div>
         </div>
 
-        {/* Tab Navigation */}
+        {/* Content Tab Navigation */}
         <div className={`mb-8 flex gap-4 border-b ${colors.border}`}>
           <button
             onClick={() => setActiveTab('chart')}
@@ -220,7 +254,11 @@ const Home = () => {
 
         {/* Overview Tab */}
         {activeTab === 'overview' && (
-          <Overview strategyName={selectedStrategy} />
+          <Overview 
+            strategyName={selectedStrategy}
+            historicalTrades={historicalTrades}
+            positionStats={positionStats}
+          />
         )}
 
         {/* Chart Tab */}

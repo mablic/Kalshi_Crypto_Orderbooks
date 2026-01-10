@@ -1,57 +1,74 @@
-import React, { useMemo, useState, useEffect } from 'react';
+import React, { useMemo, useState, useEffect, useRef } from 'react';
 import { useTheme, themeConfig } from '../theme/theme';
 import { getMAParams, calculateMovingAverage } from '../../lib/position';
+import { getStrategyPeriod } from '../../lib/strategy';
 
 const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, loading = false, strategyName = '' }) => {
   const { theme } = useTheme();
   const colors = themeConfig[theme];
   const [animatingCandle, setAnimatingCandle] = useState(null);
-  const [zoomLevel, setZoomLevel] = useState(1);
-  const [scrollPosition, setScrollPosition] = useState(0);
-  const [isDragging, setIsDragging] = useState(false);
-  const [dragStart, setDragStart] = useState(0);
+  const svgRef = useRef(null);
+  const [svgDimensions, setSvgDimensions] = useState({ width: 0, height: 0 });
+  
+  // Show only the most recent candles (last 60 candles for professional look)
+  const MAX_CANDLES = 60;
+  const displayedCandles = useMemo(() => {
+    if (!candleData || candleData.length === 0) return [];
+    return candleData.slice(-MAX_CANDLES);
+  }, [candleData]);
+  
   const [maPeriods, setMaPeriods] = useState([5, 10]);
-  const [maValues, setMaValues] = useState({}); // { 5: [...], 10: [...], etc. }
-  const [hoveredCandle, setHoveredCandle] = useState(null); // { index, x, y, candle, isVolume: boolean }
-  const [hoveredTrade, setHoveredTrade] = useState(null); // { trade, type: 'entry' | 'exit', x, y }
-  const chartContainerRef = React.useRef(null);
+  const [maValues, setMaValues] = useState({});
+  const [hoveredCandle, setHoveredCandle] = useState(null);
+  const [hoveredTrade, setHoveredTrade] = useState(null);
+  const [tradingInterval, setTradingInterval] = useState('1'); // Default to 1 minute
   
   // Get MA colors from theme
   const maColors = colors.chart.maColors || [];
 
-  // Get trades from candleData
-  const mockTrades = useMemo(() => {
-    if (candleData.length === 0) return [];
+  // Extract trades from displayedCandles - handle edge cases
+  const trades = useMemo(() => {
+    if (displayedCandles.length === 0) return [];
     
-    return candleData
-      .map((candle, index) => ({
-        id: index,
-        type: candle.trade_position === 'BUY' ? 'LONG' : candle.trade_position === 'SELL' ? 'SHORT' : null,
-        entryIndex: index,
-        entryPrice: candle.open,
-        exitIndex: null,
-        exitPrice: candleData[candleData.length - 1].close,
-        shares: 100,
-        status: 'OPEN',
-        pnl: (candleData[candleData.length - 1].close - candle.open) * 100,
-        pnlPercent: (((candleData[candleData.length - 1].close - candle.open) / candle.open) * 100),
-      }))
-      .filter(t => t.type !== null);
-  }, [candleData]);
+    const tradeList = [];
+    displayedCandles.forEach((candle, index) => {
+      // Handle empty strings, whitespace, and normalize
+      const tradePos = candle.trade_position?.trim().toUpperCase();
+      if (tradePos === 'BUY' || tradePos === 'SELL') {
+        tradeList.push({
+          id: `trade-${index}-${candle.date}`,
+          type: tradePos,
+          index: index,
+          price: candle.close,
+          date: candle.date,
+          candle: candle
+        });
+      }
+    });
+    
+    return tradeList;
+  }, [displayedCandles]);
 
-  // Mock AI trading signals
-  const aiSignals = [
-    { type: 'BUY', confidence: 0.92, reason: 'Bullish divergence detected', time: '22:30' },
-    { type: 'HOLD', confidence: 0.78, reason: 'Consolidation pattern forming', time: '22:00' },
-  ];
-  const minPrice = candleData.length > 0 ? Math.min(...candleData.map(d => d.low)) - 2 : 140;
-  const maxPrice = candleData.length > 0 ? Math.max(...candleData.map(d => d.high)) + 2 : 200;
+  const minPrice = displayedCandles.length > 0 ? Math.min(...displayedCandles.map(d => d.low)) - 2 : 140;
+  const maxPrice = displayedCandles.length > 0 ? Math.max(...displayedCandles.map(d => d.high)) + 2 : 200;
   const priceRange = maxPrice - minPrice;
 
   const chartHeight = 400;
-  const chartWidth = 100;
-  const candleWidth = candleData.length > 0 ? (chartWidth - 10) / candleData.length : 3;
-  const padding = 10;
+  const padding = 40;
+  
+  // Calculate candle width dynamically
+  const candleWidth = useMemo(() => {
+    if (displayedCandles.length === 0) return 0;
+    return 0.6;
+  }, [displayedCandles.length]);
+  
+  // Chart width - dynamic, fills available space
+  const chartWidth = useMemo(() => {
+    if (displayedCandles.length === 0) return 100;
+    const baseWidth = 600;
+    const scaleFactor = Math.max(0.8, Math.min(1.5, displayedCandles.length / 60));
+    return baseWidth * scaleFactor + padding * 2;
+  }, [displayedCandles.length]);
 
   const getPriceY = (price) => {
     const normalized = (price - minPrice) / priceRange;
@@ -59,17 +76,44 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
   };
 
   const getVolumeHeight = (volume) => {
-    const maxVolume = candleData.length > 0 ? Math.max(...candleData.map(d => d.volume)) : 1000000;
+    const maxVolume = displayedCandles.length > 0 ? Math.max(...displayedCandles.map(d => d.volume)) : 1000000;
     return (volume / maxVolume) * 60;
   };
 
   useEffect(() => {
-    if (candleData.length > 0) {
-      setAnimatingCandle(candleData.length - 1);
+    if (displayedCandles.length > 0) {
+      setAnimatingCandle(displayedCandles.length - 1);
       const timer = setTimeout(() => setAnimatingCandle(null), 1000);
       return () => clearTimeout(timer);
     }
-  }, [candleData]);
+  }, [displayedCandles]);
+
+  // Measure SVG dimensions for accurate positioning
+  useEffect(() => {
+    const updateDimensions = () => {
+      if (svgRef.current) {
+        const rect = svgRef.current.getBoundingClientRect();
+        const viewBox = svgRef.current.viewBox.baseVal;
+        setSvgDimensions({ 
+          width: rect.width, 
+          height: rect.height,
+          viewBoxWidth: viewBox.width,
+          viewBoxHeight: viewBox.height
+        });
+      }
+    };
+    
+    // Use requestAnimationFrame to ensure SVG is rendered
+    const timeoutId = setTimeout(() => {
+      updateDimensions();
+    }, 0);
+    
+    window.addEventListener('resize', updateDimensions);
+    return () => {
+      clearTimeout(timeoutId);
+      window.removeEventListener('resize', updateDimensions);
+    };
+  }, [displayedCandles.length, chartWidth]);
 
   // Fetch MA parameters
   useEffect(() => {
@@ -82,75 +126,106 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
     fetchMAParams();
   }, [strategyName]);
 
-  // Calculate moving averages when candleData or maPeriods change
+  // Fetch trading interval/period
+  useEffect(() => {
+    const fetchTradingInterval = async () => {
+      if (strategyName) {
+        const period = await getStrategyPeriod(strategyName);
+        setTradingInterval(period);
+      }
+    };
+    fetchTradingInterval();
+  }, [strategyName]);
+
+  // Calculate moving averages from FULL dataset, then slice for display
   useEffect(() => {
     if (candleData.length > 0 && maPeriods.length > 0) {
       const newMaValues = {};
       maPeriods.forEach(period => {
-        newMaValues[period] = calculateMovingAverage(candleData, period);
+        // Calculate MA from full dataset (important: use full data for accurate MA)
+        const fullMaValues = calculateMovingAverage(candleData, period);
+        // Slice to match displayed candles (last MAX_CANDLES or all if less)
+        const displayCount = Math.min(MAX_CANDLES, candleData.length);
+        const startIndex = Math.max(0, candleData.length - displayCount);
+        newMaValues[period] = fullMaValues.slice(startIndex);
       });
       setMaValues(newMaValues);
     }
   }, [candleData, maPeriods]);
 
-  const handleMouseDown = (e) => {
-    setIsDragging(true);
-    setDragStart(e.clientX);
-  };
-
-  const handleMouseMove = (e) => {
-    if (!isDragging || !chartContainerRef.current) return;
-    const diff = e.clientX - dragStart;
-    const container = chartContainerRef.current;
-    const maxScroll = container.scrollWidth - container.clientWidth;
-    let newPosition = scrollPosition - diff;
-    newPosition = Math.max(0, Math.min(newPosition, maxScroll));
-    container.scrollLeft = newPosition;
-    setScrollPosition(newPosition);
-  };
-
-  const handleMouseUp = () => {
-    setIsDragging(false);
-  };
-
-  React.useEffect(() => {
-    if (isDragging) {
-      document.addEventListener('mousemove', handleMouseMove);
-      document.addEventListener('mouseup', handleMouseUp);
-      return () => {
-        document.removeEventListener('mousemove', handleMouseMove);
-        document.removeEventListener('mouseup', handleMouseUp);
-      };
-    }
-  }, [isDragging, dragStart, scrollPosition]);
-
-  const currentPrice = candleData.length > 0 ? candleData[candleData.length - 1].close : 0;
-  const previousClose = candleData.length > 1 ? candleData[candleData.length - 2].close : currentPrice;
+  const currentPrice = displayedCandles.length > 0 ? displayedCandles[displayedCandles.length - 1].close : 0;
+  const previousClose = displayedCandles.length > 1 ? displayedCandles[displayedCandles.length - 2].close : currentPrice;
   const priceChange = currentPrice - previousClose;
   const priceChangePercent = previousClose !== 0 ? ((priceChange / previousClose) * 100).toFixed(2) : 0;
   const isPositive = priceChange >= 0;
 
-  // Get high, low, and volume from candle data
-  const highPrice = candleData.length > 0 ? Math.max(...candleData.map(d => d.high)) : 0;
-  const lowPrice = candleData.length > 0 ? Math.min(...candleData.map(d => d.low)) : 0;
-  const totalVolume = candleData.length > 0 ? candleData.reduce((sum, d) => sum + d.volume, 0) : 0;
+  const highPrice = displayedCandles.length > 0 ? Math.max(...displayedCandles.map(d => d.high)) : 0;
+  const lowPrice = displayedCandles.length > 0 ? Math.min(...displayedCandles.map(d => d.low)) : 0;
+  const totalVolume = displayedCandles.length > 0 ? displayedCandles.reduce((sum, d) => sum + d.volume, 0) : 0;
 
-  // Format number helper
   const formatNum = (num) => {
     if (num >= 1000000) return (num / 1000000).toFixed(2) + 'M';
     if (num >= 1000) return (num / 1000).toFixed(2) + 'K';
     return num.toFixed(2);
   };
 
-  // Format currency
+  // Format currency with parentheses for negatives
   const formatCurrency = (num) => {
-    return new Intl.NumberFormat('en-US', {
+    const value = num || 0;
+    const formatted = new Intl.NumberFormat('en-US', {
       style: 'currency',
       currency: 'USD',
       minimumFractionDigits: 2,
       maximumFractionDigits: 2
-    }).format(num || 0);
+    }).format(Math.abs(value));
+    
+    return value < 0 ? `(${formatted})` : formatted;
   };
+
+  // Format percentage with parentheses for negatives
+  const formatPercent = (num) => {
+    const value = parseFloat(num) || 0;
+    const formatted = Math.abs(value).toFixed(2);
+    return value < 0 ? `(${formatted}%)` : `${formatted}%`;
+  };
+
+  // Extract ticker from strategyName or use positionStats ticker
+  const ticker = useMemo(() => {
+    if (positionStats?.ticker) {
+      return positionStats.ticker;
+    }
+    if (strategyName) {
+      const parts = strategyName.split('_');
+      if (parts.length >= 2) {
+        const lastPart = parts[parts.length - 1];
+        if (/^\d+$/.test(lastPart) && parts.length >= 3) {
+          return parts[parts.length - 2];
+        }
+        return lastPart;
+      }
+    }
+    return 'N/A';
+  }, [strategyName, positionStats]);
+
+  if (loading) {
+    return (
+      <div className={`${colors.surface} border ${colors.border} rounded-2xl p-8 shadow-xl`}>
+        <div className="text-center">
+          <p className={colors.textMuted}>Loading chart data...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (displayedCandles.length === 0) {
+    return (
+      <div className={`${colors.surface} border ${colors.border} rounded-2xl p-8 shadow-xl`}>
+        <div className="text-center">
+          <p className={colors.textMuted}>No chart data available</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className={`${colors.surface} border ${colors.border} rounded-2xl p-8 shadow-xl`}>
@@ -159,13 +234,13 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
         <div className="flex items-start justify-between mb-4">
           <div>
             <h2 className={`text-3xl font-bold ${colors.text}`}>
-              AAPL
+              {ticker}
             </h2>
             <p className={`text-sm ${colors.textMuted} mt-1`}>
-              Apple Inc. | Last Update: Just now
+              {ticker !== 'N/A' ? `${ticker} Stock` : 'Stock'} | Last Update: Just now
             </p>
             <p className={`text-xs ${colors.textMuted} mt-2 italic`}>
-              📊 This chart displays 15-minute price data. The model executes trading decisions every 15 minutes.
+              📊 This chart displays {tradingInterval}-minute price data. The model executes trading decisions every {tradingInterval} {parseInt(tradingInterval) === 1 ? 'minute' : 'minutes'}.
             </p>
           </div>
           <div className={`${isPositive ? colors.greenLight : colors.redLight} px-4 py-2 rounded-lg`}>
@@ -173,136 +248,108 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
               ${currentPrice.toFixed(2)}
             </p>
             <p className={`text-sm ${isPositive ? `${colors.green600} ${colors.green400}` : `${colors.red600} ${colors.red400}`}`}>
-              {isPositive ? '+' : ''}{priceChange.toFixed(2)} ({priceChangePercent}%)
+              {formatCurrency(priceChange)} ({formatPercent(priceChangePercent)})
             </p>
           </div>
         </div>
       </div>
 
       {/* Chart Section */}
-      {/* Chart Controls */}
-          <div className="mb-6 flex items-center justify-between">
-            <div className={`text-sm font-semibold ${colors.textMuted}`}>
-              📊 Drag to pan • Scroll to zoom • Use controls below
-            </div>
-            <div className={`flex items-center gap-3 ${colors.surfaceSecondary} rounded-lg p-2`}>
-              <button
-                onClick={() => setZoomLevel(Math.max(0.5, zoomLevel - 0.25))}
-                className={`p-2 rounded transition ${colors.surface} border ${colors.border} hover:${colors.surfaceSecondary} ${colors.text}`}
-                title="Zoom Out"
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0zM13 10H7" />
-                </svg>
-              </button>
-              <div className={`text-sm font-bold ${colors.text} w-12 text-center`}>
-                {(zoomLevel * 100).toFixed(0)}%
+      <div className="mb-6">
+        <div className={`text-sm font-semibold ${colors.textMuted}`}>
+          📊 Showing most recent {displayedCandles.length} candles ({tradingInterval}-minute {parseInt(tradingInterval) === 1 ? 'interval' : 'intervals'})
+        </div>
+      </div>
+
+      {/* Candlestick Chart with Volume - Single unified chart */}
+      <div className={`mb-8 ${colors.surface} rounded-xl p-6 border ${colors.border}`}>
+        <div className="flex gap-4">
+          {/* Y-axis labels and titles */}
+          <div className="flex flex-col gap-0 flex-shrink-0">
+            <div className="flex flex-col">
+              <div className={`text-xs font-bold ${colors.text} mb-2`}>Price (USD)</div>
+              <div className="flex flex-col justify-between" style={{ height: chartHeight + padding }}>
+                {[1, 0.75, 0.5, 0.25, 0].map((ratio) => (
+                  <div key={`price-label-${ratio}`} className={`text-xs ${colors.textMuted} text-right pr-2 w-16`}>
+                    ${(minPrice + (maxPrice - minPrice) * ratio).toFixed(0)}
+                  </div>
+                ))}
               </div>
-              <button
-                onClick={() => setZoomLevel(Math.min(3, zoomLevel + 0.25))}
-                className={`p-2 rounded transition ${colors.surface} border ${colors.border} hover:${colors.surfaceSecondary} ${colors.text}`}
-                title="Zoom In"
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0zM10 7v6m3-3H7" />
-                </svg>
-              </button>
-              <div className={`w-px h-6 ${colors.border}`} />
-              <button
-                onClick={() => setZoomLevel(1)}
-                className={`px-3 py-2 rounded text-xs font-semibold transition ${colors.surface} border ${colors.border} hover:${colors.surfaceSecondary} ${colors.text}`}
-                title="Reset View"
-              >
-                ↺ Reset
-              </button>
+            </div>
+            <div className="flex flex-col">
+              <div className={`text-xs font-bold ${colors.text} mb-2`}>Volume</div>
+              <div className="flex flex-col justify-between" style={{ height: '80px' }}>
+                {displayedCandles.length > 0 && (() => {
+                  const maxVolume = Math.max(...displayedCandles.map(d => d.volume));
+                  const formatVol = (num) => {
+                    if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
+                    if (num >= 1000) return (num / 1000).toFixed(0) + 'K';
+                    return num.toFixed(0);
+                  };
+                  return [1, 0.5, 0].map((ratio) => (
+                    <div key={`volume-label-${ratio}`} className={`text-xs ${colors.textMuted} text-right pr-2 w-16`}>
+                      {formatVol(maxVolume * ratio)}
+                    </div>
+                  ));
+                })()}
+              </div>
             </div>
           </div>
 
-          {/* Candlestick Chart with Volume */}
-          <div
-            ref={chartContainerRef}
-            className={`mb-8 ${colors.surface} rounded-xl p-6 border ${colors.border} overflow-x-auto ${isDragging ? 'cursor-grabbing' : 'cursor-grab'}`}
-            onMouseDown={handleMouseDown}
-            style={{ userSelect: isDragging ? 'none' : 'auto' }}
-          >
-            {/* Price and Volume together */}
-            <div className="flex gap-4">
-              {/* Y-axis labels and titles */}
-              <div className="flex flex-col gap-0">
-                {/* Price section with label */}
-                <div className="flex flex-col">
-                  <div className={`text-xs font-bold ${colors.text} mb-2`}>Price (USD)</div>
-                  <div className="flex flex-col justify-between" style={{ height: chartHeight + padding }}>
-                    {[1, 0.75, 0.5, 0.25, 0].map((ratio) => (
-                      <div key={`price-label-${ratio}`} className={`text-xs ${colors.textMuted} text-right pr-2 w-16`}>
-                        ${(minPrice + (maxPrice - minPrice) * ratio).toFixed(0)}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-                {/* Volume section with label */}
-                <div className="flex flex-col">
-                  <div className={`text-xs font-bold ${colors.text} mb-2`}>Volume</div>
-                  <div className="flex flex-col justify-between" style={{ height: '80px' }}>
-                    {candleData.length > 0 && (() => {
-                      const maxVolume = Math.max(...candleData.map(d => d.volume));
-                      const formatVol = (num) => {
-                        if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
-                        if (num >= 1000) return (num / 1000).toFixed(0) + 'K';
-                        return num.toFixed(0);
-                      };
-                      return [1, 0.5, 0].map((ratio) => (
-                        <div key={`volume-label-${ratio}`} className={`text-xs ${colors.textMuted} text-right pr-2 w-16`}>
-                          {formatVol(maxVolume * ratio)}
+          {/* Main chart area */}
+          <div className="flex-1 flex flex-col gap-2 min-w-0 relative">
+            {/* MA Legend - Outside SVG for better positioning */}
+            {maPeriods.length > 0 && (
+              <div className="absolute top-2 right-2 z-10 flex flex-col gap-2">
+                <div className={`${colors.surface} border ${colors.border} rounded-lg px-3 py-2 shadow-lg backdrop-blur-sm`}>
+                  <div className={`text-xs font-semibold ${colors.text} mb-1.5`}>Moving Averages</div>
+                  <div className="flex flex-col gap-1.5">
+                    {maPeriods.map((period, periodIndex) => {
+                      const maData = maValues[period];
+                      if (!maData || maData.length === 0) return null;
+                      
+                      const lastValidIndex = maData.length - 1;
+                      const lastValidValue = maData[lastValidIndex];
+                      if (lastValidValue === null) return null;
+                      
+                      const color = maColors[periodIndex % maColors.length];
+                      return (
+                        <div key={`ma-legend-${period}`} className="flex items-center gap-2">
+                          <svg width="32" height="4" className="flex-shrink-0">
+                            <line
+                              x1="0"
+                              y1="2"
+                              x2="32"
+                              y2="2"
+                              stroke={color}
+                              strokeWidth="2"
+                              strokeDasharray="4,2"
+                            />
+                          </svg>
+                          <span className={`text-xs font-medium whitespace-nowrap`} style={{ color }}>
+                            MA{period}
+                          </span>
+                          <span className={`text-xs ${colors.textMuted} whitespace-nowrap`}>
+                            ${lastValidValue.toFixed(2)}
+                          </span>
                         </div>
-                      ));
-                    })()}
+                      );
+                    })}
                   </div>
                 </div>
               </div>
+            )}
 
-              {/* Main chart area */}
-              <div className="flex-1 flex flex-col gap-2">
-                <svg
-                  width={`${100 * zoomLevel}%`}
-                  height={chartHeight + padding}
-                  viewBox={`0 0 1200 ${chartHeight + padding}`}
-                  className="min-w-max"
-                  preserveAspectRatio="none"
-                  style={{ minWidth: `${100 * zoomLevel}%` }}
-                >
-              {/* Vertical hover line indicator */}
-              {hoveredCandle && (
-                <line
-                  x1={hoveredCandle.x}
-                  y1={padding}
-                  x2={hoveredCandle.x}
-                  y2={chartHeight + padding}
-                  stroke={colors.chart.primary}
-                  strokeWidth="1.5"
-                  strokeDasharray="4,4"
-                  opacity="0.6"
-                  pointerEvents="none"
-                />
-              )}
-              {hoveredTrade && (
-                <line
-                  x1={hoveredTrade.x}
-                  y1={padding}
-                  x2={hoveredTrade.x}
-                  y2={chartHeight + padding}
-                  stroke={hoveredTrade.type === 'entry' 
-                    ? (hoveredTrade.trade.type === 'LONG' ? colors.chart.entryLong : colors.chart.entryShort)
-                    : (hoveredTrade.trade.pnl >= 0 ? colors.chart.exitProfit : colors.chart.exitLoss)}
-                  strokeWidth="1.5"
-                  strokeDasharray="4,4"
-                  opacity="0.6"
-                  pointerEvents="none"
-                />
-              )}
-
-              {/* Grid lines */}
-              {candleData.length > 0 && [0, 0.25, 0.5, 0.75, 1].map((ratio) => {
+            <svg
+              ref={svgRef}
+              width="100%"
+              height={chartHeight + padding}
+              viewBox={`0 0 ${chartWidth * 10} ${chartHeight + padding}`}
+              preserveAspectRatio="none"
+              style={{ display: 'block' }}
+            >
+              {/* Grid lines - Subtle professional styling */}
+              {[0, 0.25, 0.5, 0.75, 1].map((ratio) => {
                 const y = chartHeight - ratio * chartHeight + padding;
                 return (
                   <line
@@ -312,29 +359,27 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
                     x2={padding + chartWidth * 10}
                     y2={y}
                     stroke={colors.chart.grid}
-                    strokeWidth="1"
-                    opacity="0.15"
+                    strokeWidth="0.5"
+                    opacity="0.2"
+                    strokeDasharray="2,2"
                   />
                 );
               })}
 
-
-              {/* Candlesticks */}
-              {candleData.length > 0 && candleData.map((candle, index) => {
-                const xCenter = padding + (index + 0.5) * candleWidth * 10;
+              {/* Candlesticks - Professional styling */}
+              {displayedCandles.map((candle, index) => {
+                const candleSpacing = (chartWidth * 10 - padding * 2) / displayedCandles.length;
+                const xCenter = padding + (index + 0.5) * candleSpacing;
+                const barWidth = Math.max(2, candleSpacing * 0.5);
                 const bodyTop = Math.min(getPriceY(candle.open), getPriceY(candle.close));
                 const bodyBottom = Math.max(getPriceY(candle.open), getPriceY(candle.close));
                 const wickTop = getPriceY(candle.high);
                 const wickBottom = getPriceY(candle.low);
-
                 const isGreen = candle.close >= candle.open;
                 const bodyColor = isGreen ? colors.chart.candleGreen : colors.chart.candleRed;
                 const wickColor = isGreen ? colors.chart.candleGreen : colors.chart.candleRed;
                 const isHovered = hoveredCandle?.index === index;
-                const isTradeHovered = hoveredTrade && (
-                  (hoveredTrade.trade.entryIndex === index) || 
-                  (hoveredTrade.trade.exitIndex === index)
-                );
+                const bodyHeight = Math.max(bodyBottom - bodyTop, 1);
 
                 return (
                   <g
@@ -342,14 +387,8 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
                     className={animatingCandle === index ? 'animate-pulse' : ''}
                     opacity={animatingCandle === index ? 0.8 : isHovered ? 0.7 : 1}
                     onMouseEnter={() => {
-                      const xCenter = padding + (index + 0.5) * candleWidth * 10;
-                      setHoveredCandle({
-                        index,
-                        x: xCenter,
-                        y: getPriceY(candle.close),
-                        candle
-                      });
-                      setHoveredTrade(null); // Clear trade hover when hovering candle
+                      setHoveredCandle({ index, x: xCenter, y: getPriceY(candle.close), candle });
+                      setHoveredTrade(null);
                     }}
                     onMouseLeave={() => setHoveredCandle(null)}
                     style={{ cursor: 'pointer' }}
@@ -361,33 +400,47 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
                       x2={xCenter}
                       y2={wickBottom}
                       stroke={wickColor}
-                      strokeWidth={isHovered || isTradeHovered ? "3" : "2"}
-                      opacity={isHovered || isTradeHovered ? "1" : "0.8"}
+                      strokeWidth={isHovered ? "2.5" : "1.5"}
+                      opacity="0.9"
                     />
-                    {/* Body */}
-                    <rect
-                      x={xCenter - candleWidth * 10 * 0.35}
-                      y={bodyTop}
-                      width={candleWidth * 10 * 0.7}
-                      height={Math.max(bodyBottom - bodyTop, 2)}
-                      fill={bodyColor}
-                      stroke={bodyColor}
-                      strokeWidth={isHovered || isTradeHovered ? "2.5" : "1.5"}
-                      opacity={isHovered || isTradeHovered ? "1" : "0.9"}
-                    />
+                    {/* Body - filled for down candles, outlined for up candles (professional style) */}
+                    {isGreen ? (
+                      <rect
+                        x={xCenter - barWidth / 2}
+                        y={bodyTop}
+                        width={barWidth}
+                        height={bodyHeight}
+                        fill={bodyColor}
+                        stroke={bodyColor}
+                        strokeWidth="0.5"
+                        opacity="1"
+                      />
+                    ) : (
+                      <rect
+                        x={xCenter - barWidth / 2}
+                        y={bodyTop}
+                        width={barWidth}
+                        height={bodyHeight}
+                        fill="none"
+                        stroke={bodyColor}
+                        strokeWidth={isHovered ? "2" : "1.5"}
+                        opacity="1"
+                      />
+                    )}
                   </g>
                 );
               })}
 
-              {/* Moving Average Lines - Render all MA lines dynamically */}
+              {/* Moving Average Lines - Professional styling */}
               {maPeriods.map((period, periodIndex) => {
                 const maData = maValues[period];
                 if (!maData || maData.length === 0) return null;
                 
                 const points = [];
+                const candleSpacing = (chartWidth * 10 - padding * 2) / displayedCandles.length;
                 maData.forEach((maValue, index) => {
                   if (maValue !== null) {
-                    const x = padding + (index + 0.5) * candleWidth * 10;
+                    const x = padding + (index + 0.5) * candleSpacing;
                     const y = getPriceY(maValue);
                     points.push(`${x},${y}`);
                   }
@@ -401,290 +454,72 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
                       points={points.join(' ')}
                       fill="none"
                       stroke={color}
-                      strokeWidth="2"
-                      opacity="0.8"
-                      strokeDasharray="4,2"
+                      strokeWidth="2.5"
+                      opacity="0.85"
+                      strokeDasharray="5,3"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
                     />
                   );
                 }
                 return null;
               })}
 
-              {/* Trade Entry/Exit Markers */}
-              {mockTrades.map((trade) => {
-                const entryXCenter = padding + (trade.entryIndex + 0.5) * candleWidth * 10;
-                const entryY = getPriceY(trade.entryPrice);
-                const markerRadius = 8;
-                const isEntryHovered = hoveredTrade?.trade.id === trade.id && hoveredTrade?.type === 'entry';
-                const isExitHovered = hoveredTrade?.trade.id === trade.id && hoveredTrade?.type === 'exit';
+              {/* Simple BUY/SELL indicators - dots and arrows in SVG */}
+              {trades.map((trade, tradeIndex) => {
+                const candleSpacing = (chartWidth * 10 - padding * 2) / displayedCandles.length;
+                const xCenter = padding + (trade.index + 0.5) * candleSpacing;
+                const candle = trade.candle || displayedCandles[trade.index];
+                const y = getPriceY(trade.price);
+                
+                const isBuy = trade.type === 'BUY';
+                const markerColor = isBuy ? colors.chart.entryLong : colors.chart.entryShort;
+                
+                // Arrow endpoint (where text will be) - match HTML text position
+                const arrowEndY = isBuy ? getPriceY(candle.high) - 30 : getPriceY(candle.low) + 30;
 
                 return (
-                  <g key={`trade-${trade.id}`}>
-                    {/* Entry marker - larger and more prominent */}
-                    <g
-                      onMouseEnter={() => {
-                        setHoveredTrade({
-                          trade,
-                          type: 'entry',
-                          x: entryXCenter,
-                          y: entryY
-                        });
-                        setHoveredCandle(null); // Clear candle hover when hovering trade
-                      }}
-                      onMouseLeave={() => {
-                        setHoveredTrade(null);
-                      }}
-                      style={{ cursor: 'pointer' }}
-                    >
-                      <circle
-                        cx={entryXCenter}
-                        cy={entryY}
-                        r={isEntryHovered ? markerRadius + 4 : markerRadius + 2}
-                        fill={trade.type === 'LONG' ? colors.chart.entryLong : colors.chart.entryShort}
-                        opacity={isEntryHovered ? "0.5" : "0.3"}
+                  <g key={`trade-${trade.id}`} style={{ pointerEvents: 'none' }}>
+                    {/* Arrow pointing from text to candlestick price */}
+                    <line
+                      x1={xCenter}
+                      y1={arrowEndY}
+                      x2={xCenter}
+                      y2={y}
+                      stroke={markerColor}
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      opacity="0.7"
+                    />
+                    {/* Arrow head - points to the price dot */}
+                    {isBuy ? (
+                      // BUY: arrow goes down from text (above) to price (below)
+                      <polygon
+                        points={`${xCenter},${y - 8} ${xCenter - 5},${y} ${xCenter + 5},${y}`}
+                        fill={markerColor}
+                        opacity="0.7"
                       />
-                      <circle
-                        cx={entryXCenter}
-                        cy={entryY}
-                        r={isEntryHovered ? markerRadius + 2 : markerRadius}
-                        fill={trade.type === 'LONG' ? colors.chart.entryLong : colors.chart.entryShort}
-                        stroke="white"
-                        strokeWidth={isEntryHovered ? "4" : "3"}
-                      />
-                    
-                    {/* Entry label with background box */}
-                    {trade.type === 'LONG' ? (
-                      <>
-                        {/* BUY label background */}
-                        <rect
-                          x={entryXCenter - 32}
-                          y={entryY - 35}
-                          width="64"
-                          height="24"
-                          rx="6"
-                          fill={colors.chart.entryLong}
-                          opacity="0.98"
-                          filter="drop-shadow(0 2px 4px rgba(0,0,0,0.2))"
-                        />
-                        {/* BUY icon */}
-                        <text
-                          x={entryXCenter - 18}
-                          y={entryY - 16}
-                          textAnchor="middle"
-                          className="text-sm font-bold"
-                          fill="white"
-                          fontSize="16"
-                          fontWeight="bold"
-                        >
-                          ▲
-                        </text>
-                        {/* BUY text */}
-                        <text
-                          x={entryXCenter - 6}
-                          y={entryY - 17}
-                          textAnchor="start"
-                          className="text-sm font-bold"
-                          fill="white"
-                          fontSize="13"
-                          fontWeight="bold"
-                        >
-                          BUY
-                        </text>
-                        {/* Connector line */}
-                        <line
-                          x1={entryXCenter}
-                          y1={entryY - 11}
-                          x2={entryXCenter}
-                          y2={entryY - markerRadius - 2}
-                          stroke={colors.chart.entryLong}
-                          strokeWidth="2"
-                        />
-                      </>
                     ) : (
-                      <>
-                        {/* SELL label background */}
-                        <rect
-                          x={entryXCenter - 30}
-                          y={entryY + 11}
-                          width="64"
-                          height="24"
-                          rx="6"
-                          fill={colors.chart.entryShort}
-                          opacity="0.98"
-                          filter="drop-shadow(0 2px 4px rgba(0,0,0,0.2))"
-                        />
-                        {/* SELL icon */}
-                        <text
-                          x={entryXCenter - 18}
-                          y={entryY + 30}
-                          textAnchor="middle"
-                          className="text-sm font-bold"
-                          fill="white"
-                          fontSize="16"
-                          fontWeight="bold"
-                        >
-                          ▼
-                        </text>
-                        {/* SELL text */}
-                        <text
-                          x={entryXCenter - 7}
-                          y={entryY + 29}
-                          textAnchor="start"
-                          className="text-sm font-bold"
-                          fill="white"
-                          fontSize="13"
-                          fontWeight="bold"
-                        >
-                          SELL
-                        </text>
-                        {/* Connector line */}
-                        <line
-                          x1={entryXCenter}
-                          y1={entryY + 11}
-                          x2={entryXCenter}
-                          y2={entryY + markerRadius + 2}
-                          stroke={colors.chart.entryShort}
-                          strokeWidth="2"
-                        />
-                      </>
+                      // SELL: arrow goes up from text (below) to price (above)
+                      <polygon
+                        points={`${xCenter},${y + 8} ${xCenter - 5},${y} ${xCenter + 5},${y}`}
+                        fill={markerColor}
+                        opacity="0.7"
+                      />
                     )}
-
-                    {/* Exit marker */}
-                    {trade.exitIndex !== null && (
-                      <g
-                        onMouseEnter={() => {
-                          const exitXCenter = padding + (trade.exitIndex + 0.5) * candleWidth * 10;
-                          setHoveredTrade({
-                            trade,
-                            type: 'exit',
-                            x: exitXCenter,
-                            y: getPriceY(trade.exitPrice)
-                          });
-                          setHoveredCandle(null); // Clear candle hover when hovering trade
-                        }}
-                        onMouseLeave={() => {
-                          setHoveredTrade(null);
-                        }}
-                        style={{ cursor: 'pointer' }}
-                      >
-                        <circle
-                          cx={padding + (trade.exitIndex + 0.5) * candleWidth * 10}
-                          cy={getPriceY(trade.exitPrice)}
-                          r={isExitHovered ? markerRadius + 4 : markerRadius + 2}
-                          fill={trade.pnl >= 0 ? colors.chart.exitProfit : colors.chart.exitLoss}
-                          opacity={isExitHovered ? "0.5" : "0.3"}
-                        />
-                        <circle
-                          cx={padding + (trade.exitIndex + 0.5) * candleWidth * 10}
-                          cy={getPriceY(trade.exitPrice)}
-                          r={isExitHovered ? markerRadius + 2 : markerRadius}
-                          fill={trade.pnl >= 0 ? colors.chart.exitProfit : colors.chart.exitLoss}
-                          stroke="white"
-                          strokeWidth={isExitHovered ? "4" : "3"}
-                        />
-                        
-                        {/* Exit label with background box - position based on profitability */}
-                        {trade.pnl >= 0 ? (
-                          <>
-                            {/* Profit EXIT label background */}
-                            <rect
-                              x={padding + (trade.exitIndex + 0.5) * candleWidth * 10 - 32}
-                              y={getPriceY(trade.exitPrice) - 35}
-                              width="64"
-                              height="24"
-                              rx="6"
-                              fill={colors.chart.exitProfit}
-                              opacity="0.98"
-                              filter="drop-shadow(0 2px 4px rgba(0,0,0,0.2))"
-                            />
-                            {/* Profit icon */}
-                            <text
-                              x={padding + (trade.exitIndex + 0.5) * candleWidth * 10 - 12}
-                              y={getPriceY(trade.exitPrice) - 15}
-                              textAnchor="middle"
-                              className="text-sm font-bold"
-                              fill="white"
-                              fontSize="16"
-                              fontWeight="bold"
-                            >
-                              ✓
-                            </text>
-                            {/* EXIT text */}
-                            <text
-                              x={padding + (trade.exitIndex + 0.5) * candleWidth * 10 + 2}
-                              y={getPriceY(trade.exitPrice) - 14}
-                              textAnchor="start"
-                              className="text-sm font-bold"
-                              fill="white"
-                              fontSize="13"
-                              fontWeight="bold"
-                            >
-                              EXIT
-                            </text>
-                            {/* Connector line */}
-                            <line
-                              x1={padding + (trade.exitIndex + 0.5) * candleWidth * 10}
-                              y1={getPriceY(trade.exitPrice) - 11}
-                              x2={padding + (trade.exitIndex + 0.5) * candleWidth * 10}
-                              y2={getPriceY(trade.exitPrice) - markerRadius - 2}
-                              stroke={colors.chart.exitProfit}
-                              strokeWidth="2"
-                            />
-                          </>
-                        ) : (
-                          <>
-                            {/* Loss EXIT label background */}
-                            <rect
-                              x={padding + (trade.exitIndex + 0.5) * candleWidth * 10 - 32}
-                              y={getPriceY(trade.exitPrice) + 11}
-                              width="64"
-                              height="24"
-                              rx="6"
-                              fill={colors.chart.exitLoss}
-                              opacity="0.98"
-                              filter="drop-shadow(0 2px 4px rgba(0,0,0,0.2))"
-                            />
-                            {/* Loss icon */}
-                            <text
-                              x={padding + (trade.exitIndex + 0.5) * candleWidth * 10 - 12}
-                              y={getPriceY(trade.exitPrice) + 30}
-                              textAnchor="middle"
-                              className="text-sm font-bold"
-                              fill="white"
-                              fontSize="16"
-                              fontWeight="bold"
-                            >
-                              ✕
-                            </text>
-                            {/* EXIT text */}
-                            <text
-                              x={padding + (trade.exitIndex + 0.5) * candleWidth * 10 + 2}
-                              y={getPriceY(trade.exitPrice) + 31}
-                              textAnchor="start"
-                              className="text-sm font-bold"
-                              fill="white"
-                              fontSize="13"
-                              fontWeight="bold"
-                            >
-                              EXIT
-                            </text>
-                            {/* Connector line */}
-                            <line
-                              x1={padding + (trade.exitIndex + 0.5) * candleWidth * 10}
-                              y1={getPriceY(trade.exitPrice) + 11}
-                              x2={padding + (trade.exitIndex + 0.5) * candleWidth * 10}
-                              y2={getPriceY(trade.exitPrice) + markerRadius + 2}
-                              stroke={colors.chart.exitLoss}
-                              strokeWidth="2"
-                            />
-                          </>
-                        )}
-                      </g>
-                    )}
-                    </g>
+                    {/* Simple dot on price */}
+                    <circle
+                      cx={xCenter}
+                      cy={y}
+                      r="4"
+                      fill={markerColor}
+                      stroke="white"
+                      strokeWidth="1.5"
+                    />
                   </g>
                 );
               })}
+
 
               {/* X-axis line */}
               <line
@@ -695,8 +530,6 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
                 stroke={colors.chart.grid}
                 strokeWidth="1"
               />
-
-              {/* Y-axis line */}
               <line
                 x1={padding}
                 y1={padding}
@@ -705,448 +538,236 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
                 stroke={colors.chart.grid}
                 strokeWidth="1"
               />
+            </svg>
 
-              {/* Tooltip for Candlestick */}
-              {hoveredCandle && !hoveredTrade && (
-                <g>
-                  {hoveredCandle.isVolume ? (
-                    // Volume tooltip - positioned just above the bottom of candlestick chart
-                    <>
-                      {/* Tooltip background - fixed at bottom of chart */}
-                      <rect
-                        x={Math.min(Math.max(hoveredCandle.x + 15, padding + 5), padding + chartWidth * 10 - 155)}
-                        y={chartHeight + padding - 100}
-                        width="150"
-                        height="95"
-                        rx="8"
-                        fill={colors.svg.surface}
-                        stroke={colors.svg.border}
-                        strokeWidth="1.5"
-                        opacity="0.98"
-                        filter="drop-shadow(0 4px 12px rgba(0,0,0,0.25))"
-                      />
-                      {/* Tooltip header */}
-                      <rect
-                        x={Math.min(Math.max(hoveredCandle.x + 15, padding + 5), padding + chartWidth * 10 - 155)}
-                        y={chartHeight + padding - 100}
-                        width="150"
-                        height="20"
-                        rx="8"
-                        fill={colors.chart.primary}
-                        opacity="0.15"
-                      />
-                      {/* Tooltip content */}
-                      <text
-                        x={Math.min(Math.max(hoveredCandle.x + 22, padding + 12), padding + chartWidth * 10 - 148)}
-                        y={chartHeight + padding - 85}
-                        fill={colors.svg.text}
-                        fontSize="12"
-                        fontWeight="bold"
-                      >
-                        OHLC Data
-                      </text>
-                      <text
-                        x={Math.min(Math.max(hoveredCandle.x + 22, padding + 12), padding + chartWidth * 10 - 148)}
-                        y={chartHeight + padding - 68}
-                        fill={colors.svg.textMuted}
-                        fontSize="10"
-                      >
-                        Open: ${hoveredCandle.candle.open.toFixed(2)}
-                      </text>
-                      <text
-                        x={Math.min(Math.max(hoveredCandle.x + 22, padding + 12), padding + chartWidth * 10 - 148)}
-                        y={chartHeight + padding - 55}
-                        fill={colors.svg.textMuted}
-                        fontSize="10"
-                      >
-                        High: ${hoveredCandle.candle.high.toFixed(2)}
-                      </text>
-                      <text
-                        x={Math.min(Math.max(hoveredCandle.x + 22, padding + 12), padding + chartWidth * 10 - 148)}
-                        y={chartHeight + padding - 42}
-                        fill={colors.svg.textMuted}
-                        fontSize="10"
-                      >
-                        Low: ${hoveredCandle.candle.low.toFixed(2)}
-                      </text>
-                      <text
-                        x={Math.min(Math.max(hoveredCandle.x + 22, padding + 12), padding + chartWidth * 10 - 148)}
-                        y={chartHeight + padding - 29}
-                        fill={colors.svg.textMuted}
-                        fontSize="10"
-                      >
-                        Close: ${hoveredCandle.candle.close.toFixed(2)}
-                      </text>
-                      {hoveredCandle.candle.volume && (
-                        <text
-                          x={Math.min(Math.max(hoveredCandle.x + 22, padding + 12), padding + chartWidth * 10 - 148)}
-                          y={chartHeight + padding - 16}
-                          fill={colors.svg.textMuted}
-                          fontSize="10"
-                        >
-                          Volume: {formatNum(hoveredCandle.candle.volume)}
-                        </text>
-                      )}
-                    </>
-                  ) : (
-                    // Candlestick tooltip - positioned above the candle
-                    <>
-                      {/* Tooltip background */}
-                      <rect
-                        x={Math.min(Math.max(hoveredCandle.x - 75, padding + 5), padding + chartWidth * 10 - 155)}
-                        y={hoveredCandle.y - 100}
-                        width="150"
-                        height="95"
-                        rx="8"
-                        fill={colors.svg.surface}
-                        stroke={colors.svg.border}
-                        strokeWidth="1.5"
-                        opacity="0.98"
-                        filter="drop-shadow(0 4px 12px rgba(0,0,0,0.25))"
-                      />
-                      {/* Tooltip header */}
-                      <rect
-                        x={Math.min(Math.max(hoveredCandle.x - 75, padding + 5), padding + chartWidth * 10 - 155)}
-                        y={hoveredCandle.y - 100}
-                        width="150"
-                        height="20"
-                        rx="8"
-                        fill={colors.chart.primary}
-                        opacity="0.15"
-                      />
-                      {/* Tooltip content */}
-                      <text
-                        x={Math.min(Math.max(hoveredCandle.x - 68, padding + 12), padding + chartWidth * 10 - 148)}
-                        y={hoveredCandle.y - 85}
-                        fill={colors.svg.text}
-                        fontSize="12"
-                        fontWeight="bold"
-                      >
-                        OHLC Data
-                      </text>
-                      <text
-                        x={Math.min(Math.max(hoveredCandle.x - 68, padding + 12), padding + chartWidth * 10 - 148)}
-                        y={hoveredCandle.y - 68}
-                        fill={colors.svg.textMuted}
-                        fontSize="10"
-                      >
-                        Open: ${hoveredCandle.candle.open.toFixed(2)}
-                      </text>
-                      <text
-                        x={Math.min(Math.max(hoveredCandle.x - 68, padding + 12), padding + chartWidth * 10 - 148)}
-                        y={hoveredCandle.y - 55}
-                        fill={colors.svg.textMuted}
-                        fontSize="10"
-                      >
-                        High: ${hoveredCandle.candle.high.toFixed(2)}
-                      </text>
-                      <text
-                        x={Math.min(Math.max(hoveredCandle.x - 68, padding + 12), padding + chartWidth * 10 - 148)}
-                        y={hoveredCandle.y - 42}
-                        fill={colors.svg.textMuted}
-                        fontSize="10"
-                      >
-                        Low: ${hoveredCandle.candle.low.toFixed(2)}
-                      </text>
-                      <text
-                        x={Math.min(Math.max(hoveredCandle.x - 68, padding + 12), padding + chartWidth * 10 - 148)}
-                        y={hoveredCandle.y - 29}
-                        fill={colors.svg.textMuted}
-                        fontSize="10"
-                      >
-                        Close: ${hoveredCandle.candle.close.toFixed(2)}
-                      </text>
-                      {hoveredCandle.candle.volume && (
-                        <text
-                          x={Math.min(Math.max(hoveredCandle.x - 68, padding + 12), padding + chartWidth * 10 - 148)}
-                          y={hoveredCandle.y - 16}
-                          fill={colors.svg.textMuted}
-                          fontSize="10"
-                        >
-                          Volume: {formatNum(hoveredCandle.candle.volume)}
-                        </text>
-                      )}
-                    </>
-                  )}
-                </g>
-              )}
+            {/* BUY/SELL text labels - HTML to avoid stretching */}
+            {trades.map((trade) => {
+              const candleSpacing = (chartWidth * 10 - padding * 2) / displayedCandles.length;
+              const xCenter = padding + (trade.index + 0.5) * candleSpacing;
+              const candle = trade.candle || displayedCandles[trade.index];
+              
+              const isBuy = trade.type === 'BUY';
+              const markerColor = isBuy ? colors.chart.entryLong : colors.chart.entryShort;
+              
+              // Y position - arrow end point (must match SVG arrow calculation)
+              const arrowEndY = isBuy ? getPriceY(candle.high) - 50 : getPriceY(candle.low) + 50;
+              
+              // Calculate position using actual SVG dimensions
+              const svgViewBoxWidth = svgDimensions.viewBoxWidth || chartWidth * 10;
+              const svgViewBoxHeight = svgDimensions.viewBoxHeight || (chartHeight + padding);
+              const actualSvgWidth = svgDimensions.width || svgViewBoxWidth;
+              const actualSvgHeight = svgDimensions.height || svgViewBoxHeight;
+              
+              // Convert viewBox coordinates to actual pixel positions
+              // With preserveAspectRatio="none", coordinates scale linearly
+              const scaleX = actualSvgWidth / svgViewBoxWidth;
+              const scaleY = actualSvgHeight / svgViewBoxHeight;
+              
+              // Get SVG's position relative to parent
+              const svgRect = svgRef.current?.getBoundingClientRect();
+              const parentRect = svgRef.current?.parentElement?.getBoundingClientRect();
+              const svgOffsetX = svgRect && parentRect ? svgRect.left - parentRect.left : 0;
+              const svgOffsetY = svgRect && parentRect ? svgRect.top - parentRect.top : 0;
+              
+              // Calculate absolute pixel position
+              const xPixel = (xCenter * scaleX) + svgOffsetX;
+              const yPixel = (arrowEndY * scaleY) + svgOffsetY;
+              
+              // Convert to percentage of parent container
+              const parentWidth = parentRect?.width || actualSvgWidth;
+              const parentHeight = parentRect?.height || actualSvgHeight;
+              const xPercent = (xPixel / parentWidth) * 100;
+              const yPercent = (yPixel / parentHeight) * 100;
 
-              {/* Tooltip for Trade Markers */}
-              {hoveredTrade && (
-                <g>
-                  {/* Tooltip background */}
-                  <rect
-                    x={Math.min(Math.max(hoveredTrade.x - 90, padding + 5), padding + chartWidth * 10 - 185)}
-                    y={hoveredTrade.y - (hoveredTrade.type === 'entry' ? 120 : 120)}
-                    width="180"
-                    height={hoveredTrade.type === 'exit' ? "110" : "95"}
-                    rx="8"
-                    fill={colors.svg.surface}
-                    stroke={hoveredTrade.type === 'entry' 
-                      ? (hoveredTrade.trade.type === 'LONG' ? colors.chart.entryLong : colors.chart.entryShort)
-                      : (hoveredTrade.trade.pnl >= 0 ? colors.chart.exitProfit : colors.chart.exitLoss)}
-                    strokeWidth="2"
-                    opacity="0.98"
-                    filter="drop-shadow(0 4px 12px rgba(0,0,0,0.25))"
-                  />
-                  {/* Tooltip header */}
-                  <rect
-                    x={Math.min(Math.max(hoveredTrade.x - 90, padding + 5), padding + chartWidth * 10 - 185)}
-                    y={hoveredTrade.y - (hoveredTrade.type === 'entry' ? 120 : 120)}
-                    width="180"
-                    height="22"
-                    rx="8"
-                    fill={hoveredTrade.type === 'entry' 
-                      ? (hoveredTrade.trade.type === 'LONG' ? colors.chart.entryLong : colors.chart.entryShort)
-                      : (hoveredTrade.trade.pnl >= 0 ? colors.chart.exitProfit : colors.chart.exitLoss)}
-                    opacity="0.9"
-                  />
-                  {/* Tooltip content */}
-                  <text
-                    x={Math.min(Math.max(hoveredTrade.x - 83, padding + 12), padding + chartWidth * 10 - 178)}
-                    y={hoveredTrade.y - 103}
-                    fill="white"
-                    fontSize="12"
-                    fontWeight="bold"
-                  >
-                    {hoveredTrade.type === 'entry' 
-                      ? `${hoveredTrade.trade.type === 'LONG' ? 'BUY' : 'SELL'} Entry`
-                      : 'Trade Exit'}
-                  </text>
-                  {hoveredTrade.type === 'entry' ? (
-                    <>
-                      <text
-                        x={Math.min(Math.max(hoveredTrade.x - 83, padding + 12), padding + chartWidth * 10 - 178)}
-                        y={hoveredTrade.y - 86}
-                        fill={colors.svg.textMuted}
-                        fontSize="10"
-                      >
-                        Price: ${hoveredTrade.trade.entryPrice.toFixed(2)}
-                      </text>
-                      <text
-                        x={Math.min(Math.max(hoveredTrade.x - 83, padding + 12), padding + chartWidth * 10 - 178)}
-                        y={hoveredTrade.y - 73}
-                        fill={colors.svg.textMuted}
-                        fontSize="10"
-                      >
-                        Shares: {hoveredTrade.trade.shares}
-                      </text>
-                      <text
-                        x={Math.min(Math.max(hoveredTrade.x - 83, padding + 12), padding + chartWidth * 10 - 178)}
-                        y={hoveredTrade.y - 60}
-                        fill={colors.svg.textMuted}
-                        fontSize="10"
-                      >
-                        Status: {hoveredTrade.trade.status}
-                      </text>
-                    </>
-                  ) : (
-                    <>
-                      <text
-                        x={Math.min(Math.max(hoveredTrade.x - 83, padding + 12), padding + chartWidth * 10 - 178)}
-                        y={hoveredTrade.y - 86}
-                        fill={colors.svg.textMuted}
-                        fontSize="10"
-                      >
-                        Exit Price: ${hoveredTrade.trade.exitPrice.toFixed(2)}
-                      </text>
-                      <text
-                        x={Math.min(Math.max(hoveredTrade.x - 83, padding + 12), padding + chartWidth * 10 - 178)}
-                        y={hoveredTrade.y - 73}
-                        fill={hoveredTrade.trade.pnl >= 0 ? colors.chart.exitProfit : colors.chart.exitLoss}
-                        fontSize="11"
-                        fontWeight="bold"
-                      >
-                        P&L: {hoveredTrade.trade.pnl >= 0 ? '+' : ''}${hoveredTrade.trade.pnl.toFixed(2)}
-                      </text>
-                      <text
-                        x={Math.min(Math.max(hoveredTrade.x - 83, padding + 12), padding + chartWidth * 10 - 178)}
-                        y={hoveredTrade.y - 60}
-                        fill={hoveredTrade.trade.pnl >= 0 ? colors.chart.exitProfit : colors.chart.exitLoss}
-                        fontSize="11"
-                        fontWeight="bold"
-                      >
-                        P&L %: {hoveredTrade.trade.pnl >= 0 ? '+' : ''}{hoveredTrade.trade.pnlPercent.toFixed(2)}%
-                      </text>
-                    </>
-                  )}
-                </g>
-              )}
-
-              {/* MA Labels in top right corner */}
-              {maPeriods.map((period, periodIndex) => {
-                const maData = maValues[period];
-                if (!maData || maData.length === 0) return null;
-                
-                const lastValidIndex = maData.length - 1;
-                const lastValidValue = maData[lastValidIndex];
-                if (lastValidValue === null) return null;
-                
-                const color = maColors[periodIndex % maColors.length];
-                // Position labels all the way to the right edge of the viewBox
-                const viewBoxWidth = 1200; // ViewBox width
-                const labelWidth = 50; // Width of label
-                const labelX = viewBoxWidth - 10; // Right edge with small margin
-                const labelY = padding + 15 + (periodIndex * 18); // Stacked vertically with spacing
-                
-                return (
-                  <g key={`ma-label-${period}`}>
-                    {/* Line indicator */}
-                    <line
-                      x1={labelX - labelWidth + 5}
-                      y1={labelY}
-                      x2={labelX - labelWidth + 20}
-                      y2={labelY}
-                      stroke={color}
-                      strokeWidth="2"
-                      strokeDasharray="4,2"
-                    />
-                    {/* Label text */}
-                    <text
-                      x={labelX - labelWidth + 25}
-                      y={labelY + 4}
-                      textAnchor="start"
-                      fill={color}
-                      fontSize="11"
-                      fontWeight="bold"
-                      style={{ pointerEvents: 'none' }}
-                    >
-                      MA{period}
-                    </text>
-                  </g>
-                );
-              })}
-                </svg>
-
-                {/* Separator line between price and volume */}
-                <div className={`h-px border-t ${colors.border}`} />
-
-                {/* Volume Chart */}
-                <svg
-                  width={`${100 * zoomLevel}%`}
-                  height="80"
-                  viewBox={`0 0 1200 80`}
-                  className="min-w-max"
-                  preserveAspectRatio="none"
-                  style={{ minWidth: `${100 * zoomLevel}%` }}
+              return (
+                <div
+                  key={`trade-label-${trade.id}`}
+                  className="absolute pointer-events-none z-10"
+                  style={{
+                    left: `${xPercent}%`,
+                    top: `${yPercent}%`,
+                    transform: 'translate(-50%, -50%)',
+                    color: markerColor,
+                    fontSize: '20px',
+                    fontFamily: 'Arial, Helvetica, sans-serif',
+                    fontWeight: '600',
+                    whiteSpace: 'nowrap',
+                    textShadow: '0 1px 2px rgba(255,255,255,0.8)'
+                  }}
                 >
-                  {/* Volume grid lines */}
-                  {[1, 0.5, 0].map((ratio) => (
-                    <line
-                      key={`vol-grid-${ratio}`}
-                      x1={padding}
-                      y1={50 - ratio * 50}
-                      x2={padding + chartWidth * 10}
-                      y2={50 - ratio * 50}
-                      stroke={colors.chart.grid}
-                      strokeWidth="1"
-                      opacity="0.15"
-                    />
-                  ))}
+                  {trade.type}
+                </div>
+              );
+            })}
 
-                  {/* Volume bars */}
-                  {candleData.length > 0 && candleData.map((candle, index) => {
-                    const xCenter = padding + (index + 0.5) * candleWidth * 10;
-                    const maxVolume = Math.max(...candleData.map(d => d.volume));
-                    const volumeHeight = (candle.volume / maxVolume) * 50;
-                    const volumeY = 50 - volumeHeight;
-
-                    const isGreen = candle.close >= candle.open;
-                    const isHovered = hoveredCandle?.index === index;
-
-                    return (
-                      <rect
-                        key={`volume-${index}`}
-                        x={xCenter - candleWidth * 10 * 0.4}
-                        y={volumeY}
-                        width={candleWidth * 10 * 0.8}
-                        height={volumeHeight}
-                        fill={isGreen ? colors.chart.candleGreen : colors.chart.candleRed}
-                        opacity={isHovered ? "0.6" : "0.4"}
-                        onMouseEnter={() => {
-                          const xCenter = padding + (index + 0.5) * candleWidth * 10;
-                          const maxVolume = Math.max(...candleData.map(d => d.volume));
-                          const volumeHeight = (candle.volume / maxVolume) * 50;
-                          const volumeY = 50 - volumeHeight;
-                          setHoveredCandle({
-                            index,
-                            x: xCenter,
-                            y: chartHeight + padding + volumeY + volumeHeight / 2, // Position at center of volume bar
-                            candle,
-                            isVolume: true
-                          });
-                          setHoveredTrade(null); // Clear trade hover when hovering volume
-                        }}
-                        onMouseLeave={() => setHoveredCandle(null)}
-                        style={{ cursor: 'pointer' }}
-                      />
-                    );
-                  })}
-
-                  {/* Volume Y-axis line */}
-                  <line
-                    x1={padding}
-                    y1="0"
-                    x2={padding}
-                    y2="50"
-                    stroke={colors.chart.grid}
-                    strokeWidth="1"
-                  />
-                </svg>
-
-                {/* Time axis section */}
-                <div className="flex flex-col gap-1">
-                  {/* Time labels below everything */}
-                  <div className="flex justify-between text-xs" style={{ paddingLeft: padding, paddingRight: '1rem' }}>
-                    {candleData.length > 0 && candleData.map((candle, index) => {
-                      if (index % Math.ceil(candleData.length / 6) !== 0) return null;
-                      // Format the date properly - already in local time
-                      const dateObj = new Date(candle.date);
-                      const formatted = dateObj.toLocaleString('en-US', {
-                        month: 'short',
-                        day: '2-digit',
-                        hour: '2-digit',
-                        minute: '2-digit',
-                        hour12: false
-                      });
-                      return (
-                        <span key={`time-${index}`} className={colors.textMuted}>
-                          {formatted}
-                        </span>
-                      );
+            {/* Tooltip for hovered candle */}
+            {hoveredCandle && (
+              <div 
+                className="absolute z-20 pointer-events-none"
+                style={{
+                  left: `${(hoveredCandle.x / (chartWidth * 10)) * 100}%`,
+                  top: '0px',
+                  transform: 'translate(-50%, 0)',
+                }}
+              >
+                <div className={`${colors.surface} border ${colors.border} rounded-lg px-3 py-2 shadow-xl backdrop-blur-sm`}>
+                  <div className={`text-xs font-semibold ${colors.text} mb-1`}>
+                    {new Date(hoveredCandle.candle.date).toLocaleString('en-US', {
+                      month: 'short',
+                      day: '2-digit',
+                      hour: '2-digit',
+                      minute: '2-digit',
+                      hour12: false
                     })}
                   </div>
-                  {/* Time axis label */}
-                  <div className={`text-xs font-bold ${colors.text} mt-2 text-center`}>
-                    Time (CST)
+                  <div className="flex flex-col gap-0.5">
+                    <div className="flex justify-between gap-3">
+                      <span className={`text-xs ${colors.textMuted}`}>Open:</span>
+                      <span className={`text-xs font-medium ${colors.text}`}>${hoveredCandle.candle.open.toFixed(2)}</span>
+                    </div>
+                    <div className="flex justify-between gap-3">
+                      <span className={`text-xs ${colors.textMuted}`}>High:</span>
+                      <span className={`text-xs font-medium ${colors.text}`}>${hoveredCandle.candle.high.toFixed(2)}</span>
+                    </div>
+                    <div className="flex justify-between gap-3">
+                      <span className={`text-xs ${colors.textMuted}`}>Low:</span>
+                      <span className={`text-xs font-medium ${colors.text}`}>${hoveredCandle.candle.low.toFixed(2)}</span>
+                    </div>
+                    <div className="flex justify-between gap-3">
+                      <span className={`text-xs ${colors.textMuted}`}>Close:</span>
+                      <span className={`text-xs font-medium ${colors.text}`}>${hoveredCandle.candle.close.toFixed(2)}</span>
+                    </div>
+                    <div className="flex justify-between gap-3">
+                      <span className={`text-xs ${colors.textMuted}`}>Volume:</span>
+                      <span className={`text-xs font-medium ${colors.text}`}>{formatNum(hoveredCandle.candle.volume)}</span>
+                    </div>
+                    {hoveredCandle.candle.trade_position && (
+                      <div className="flex justify-between gap-3 mt-1 pt-1 border-t border-slate-200 dark:border-slate-700">
+                        <span className={`text-xs ${colors.textMuted}`}>Signal:</span>
+                        <span 
+                          className={`text-xs font-bold`}
+                          style={{ 
+                            color: hoveredCandle.candle.trade_position === 'BUY' 
+                              ? colors.chart.entryLong 
+                              : colors.chart.entryShort 
+                          }}
+                        >
+                          {hoveredCandle.candle.trade_position}
+                        </span>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
+            )}
+
+            {/* Separator line */}
+            <div className={`h-px border-t ${colors.border}`} />
+
+            {/* Volume Chart */}
+            <svg
+              width="100%"
+              height="80"
+              viewBox={`0 0 ${chartWidth * 10} 80`}
+              preserveAspectRatio="none"
+              style={{ display: 'block' }}
+            >
+              {displayedCandles.map((candle, index) => {
+                const candleSpacing = (chartWidth * 10 - padding * 2) / displayedCandles.length;
+                const xCenter = padding + (index + 0.5) * candleSpacing;
+                const barWidth = candleSpacing * 0.7;
+                const maxVolume = Math.max(...displayedCandles.map(d => d.volume));
+                const volumeHeight = (candle.volume / maxVolume) * 50;
+                const volumeY = 50 - volumeHeight;
+                const isGreen = candle.close >= candle.open;
+
+                return (
+                  <rect
+                    key={`volume-${index}`}
+                    x={xCenter - barWidth / 2}
+                    y={volumeY}
+                    width={barWidth}
+                    height={volumeHeight}
+                    fill={isGreen ? colors.chart.candleGreen : colors.chart.candleRed}
+                    opacity="0.4"
+                  />
+                );
+              })}
+            </svg>
+
+            {/* Time axis - Rotated labels */}
+            <div className="flex flex-col gap-1 mt-2">
+              <div className="relative" style={{ height: '60px', paddingLeft: padding, paddingRight: padding }}>
+                {displayedCandles.length > 0 && (() => {
+                  const containerWidth = chartWidth * 10 - padding * 2;
+                  const minLabelWidth = 80;
+                  const maxLabels = Math.floor(containerWidth / minLabelWidth);
+                  const labelInterval = Math.max(1, Math.ceil(displayedCandles.length / Math.min(maxLabels, 12)));
+                  
+                  return displayedCandles.map((candle, index) => {
+                    const showLabel = index % labelInterval === 0 || index === displayedCandles.length - 1;
+                    if (!showLabel) return null;
+                    
+                    const candleSpacing = (chartWidth * 10 - padding * 2) / displayedCandles.length;
+                    const xPosition = padding + (index + 0.5) * candleSpacing;
+                    const xPercent = (xPosition / (chartWidth * 10)) * 100;
+                    
+                    const dateObj = new Date(candle.date);
+                    const formatted = dateObj.toLocaleString('en-US', {
+                      month: 'short',
+                      day: '2-digit',
+                      hour: '2-digit',
+                      minute: '2-digit',
+                      hour12: false
+                    });
+                    
+                    return (
+                      <span
+                        key={`time-${index}`}
+                        className={`text-xs ${colors.textMuted} absolute`}
+                        style={{
+                          left: `${xPercent}%`,
+                          transform: 'translateX(-50%) rotate(-45deg)',
+                          transformOrigin: 'center',
+                          whiteSpace: 'nowrap',
+                          paddingTop: '5px'
+                        }}
+                      >
+                        {formatted}
+                      </span>
+                    );
+                  });
+                })()}
+              </div>
+              <div className={`text-xs font-bold ${colors.text} text-center`}>
+                Time (CST)
+              </div>
             </div>
           </div>
+        </div>
+      </div>
 
-
-          {/* Chart Stats */}
-            <div className="mb-8 grid grid-cols-2 md:grid-cols-4 gap-4">
-            <div className={`${colors.surface} border ${colors.border} rounded-lg p-4`}>
-              <p className={`text-xs ${colors.textMuted} mb-1 font-medium`}>High</p>
-              <p className={`text-lg font-bold ${colors.text}`}>${highPrice.toFixed(2)}</p>
-            </div>
-            <div className={`${colors.surface} border ${colors.border} rounded-lg p-4`}>
-              <p className={`text-xs ${colors.textMuted} mb-1 font-medium`}>Low</p>
-              <p className={`text-lg font-bold ${colors.text}`}>${lowPrice.toFixed(2)}</p>
-            </div>
-            <div className={`${colors.surface} border ${colors.border} rounded-lg p-4`}>
-              <p className={`text-xs ${colors.textMuted} mb-1 font-medium`}>Volume</p>
-              <p className={`text-lg font-bold ${colors.text}`}>{formatNum(totalVolume)}</p>
-            </div>
-            <div className={`${colors.surface} border ${colors.border} rounded-lg p-4`}>
-              <p className={`text-xs ${colors.textMuted} mb-1 font-medium`}>Change</p>
-              <p className={`text-lg font-bold ${isPositive ? `${colors.green600} ${colors.green400}` : `${colors.red600} ${colors.red400}`}`}>
-                {isPositive ? '+' : ''}{priceChangePercent}%
-              </p>
-            </div>
-          </div>
+      {/* Chart Stats */}
+      <div className="mb-8 grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className={`${colors.surface} border ${colors.border} rounded-lg p-4`}>
+          <p className={`text-xs ${colors.textMuted} mb-1 font-medium`}>High</p>
+          <p className={`text-lg font-bold ${colors.text}`}>${highPrice.toFixed(2)}</p>
+        </div>
+        <div className={`${colors.surface} border ${colors.border} rounded-lg p-4`}>
+          <p className={`text-xs ${colors.textMuted} mb-1 font-medium`}>Low</p>
+          <p className={`text-lg font-bold ${colors.text}`}>${lowPrice.toFixed(2)}</p>
+        </div>
+        <div className={`${colors.surface} border ${colors.border} rounded-lg p-4`}>
+          <p className={`text-xs ${colors.textMuted} mb-1 font-medium`}>Volume</p>
+          <p className={`text-lg font-bold ${colors.text}`}>{formatNum(totalVolume)}</p>
+        </div>
+        <div className={`${colors.surface} border ${colors.border} rounded-lg p-4`}>
+          <p className={`text-xs ${colors.textMuted} mb-1 font-medium`}>Change</p>
+          <p className={`text-lg font-bold ${isPositive ? `${colors.green600} ${colors.green400}` : `${colors.red600} ${colors.red400}`}`}>
+            {formatPercent(priceChangePercent)}
+          </p>
+        </div>
+      </div>
     </div>
   );
 };
