@@ -1,8 +1,17 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useTheme, themeConfig } from '../theme/theme';
 import { getStrategyDetails } from '../../lib/strategy';
+import { kalshiOverviewCopy, getKalshiRestFieldRows } from '../../lib/kalshi';
 
-const Overview = ({ strategyName = 'LSTM_Strategy_A', historicalTrades = [], positionStats = null }) => {
+const Overview = ({
+  strategyName = 'LSTM_Strategy_A',
+  historicalTrades = [],
+  positionStats = null,
+  kalshiMode = false,
+  kalshiMarket = null,
+  kalshiTickerLabel = '',
+  kalshiSnapshotCount = 0,
+}) => {
   const { theme } = useTheme();
   const colors = themeConfig[theme];
   const [strategy, setStrategy] = useState(null);
@@ -69,6 +78,21 @@ const Overview = ({ strategyName = 'LSTM_Strategy_A', historicalTrades = [], pos
   };
 
   useEffect(() => {
+    if (kalshiMode) {
+      setStrategy({
+        title: kalshiOverviewCopy.title,
+        shortDescription: kalshiOverviewCopy.shortDescription,
+        overview: kalshiOverviewCopy.overview,
+        modelArchitecture: null,
+        ensembleVoting: null,
+        modelSelection: null,
+        tradingFlow: null,
+        advantages: null,
+      });
+      setLoading(false);
+      return;
+    }
+
     const loadStrategy = async () => {
       try {
         setLoading(true);
@@ -80,15 +104,20 @@ const Overview = ({ strategyName = 'LSTM_Strategy_A', historicalTrades = [], pos
         setLoading(false);
       }
     };
-    
+
     loadStrategy();
-  }, [strategyName]);
+  }, [strategyName, kalshiMode]);
+
+  const kalshiRestRows = useMemo(
+    () => (kalshiMode ? getKalshiRestFieldRows(kalshiMarket) : []),
+    [kalshiMode, kalshiMarket]
+  );
 
   if (loading) {
     return (
       <div className={`${colors.surface} border ${colors.border} rounded-2xl p-8 shadow-xl`}>
         <div className={`text-center py-12 ${colors.textMuted}`}>
-          Loading strategy details...
+          {kalshiMode ? 'Loading…' : 'Loading strategy details...'}
         </div>
       </div>
     );
@@ -113,38 +142,119 @@ const Overview = ({ strategyName = 'LSTM_Strategy_A', historicalTrades = [], pos
       </div>
 
       <div className="p-8">
-        {/* Performance Summary */}
-        <section className="mb-10">
-          <h2 className={`text-2xl font-bold ${colors.text} mb-4`}>Performance Summary</h2>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className={`${colors.surfaceSecondary} rounded-lg p-6 border ${colors.border}`}>
-              <p className={`text-xs font-semibold ${colors.textMuted} uppercase tracking-wider mb-2`}>Total Realized PnL</p>
-              <p className={`text-2xl font-bold ${totalRealizedPnL >= 0 ? colors.green600 : colors.red600} ${totalRealizedPnL >= 0 ? colors.green400 : colors.red400}`}>
-                {formatCurrency(totalRealizedPnL)}
-              </p>
+        {/* Performance Summary — trading strategies only */}
+        {!kalshiMode && (
+          <section className="mb-10">
+            <h2 className={`text-2xl font-bold ${colors.text} mb-4`}>Performance Summary</h2>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className={`${colors.surfaceSecondary} rounded-lg p-6 border ${colors.border}`}>
+                <p className={`text-xs font-semibold ${colors.textMuted} uppercase tracking-wider mb-2`}>Total Realized PnL</p>
+                <p className={`text-2xl font-bold ${totalRealizedPnL >= 0 ? colors.green600 : colors.red600} ${totalRealizedPnL >= 0 ? colors.green400 : colors.red400}`}>
+                  {formatCurrency(totalRealizedPnL)}
+                </p>
+              </div>
+              <div className={`${colors.surfaceSecondary} rounded-lg p-6 border ${colors.border}`}>
+                <p className={`text-xs font-semibold ${colors.textMuted} uppercase tracking-wider mb-2`}>Running PnL</p>
+                <p className={`text-2xl font-bold ${(positionStats?.runningPnL || 0) >= 0 ? colors.green600 : colors.red600} ${(positionStats?.runningPnL || 0) >= 0 ? colors.green400 : colors.red400}`}>
+                  {formatCurrency(positionStats?.runningPnL || 0)}
+                </p>
+              </div>
+              <div className={`${colors.surfaceSecondary} rounded-lg p-6 border ${colors.border}`}>
+                <p className={`text-xs font-semibold ${colors.textMuted} uppercase tracking-wider mb-2`}>Account Balance</p>
+                <p className={`text-2xl font-bold ${colors.text}`}>
+                  {formatCurrency((positionStats?.initialBalance || 100000) + totalRealizedPnL)}
+                </p>
+              </div>
             </div>
-            <div className={`${colors.surfaceSecondary} rounded-lg p-6 border ${colors.border}`}>
-              <p className={`text-xs font-semibold ${colors.textMuted} uppercase tracking-wider mb-2`}>Running PnL</p>
-              <p className={`text-2xl font-bold ${(positionStats?.runningPnL || 0) >= 0 ? colors.green600 : colors.red600} ${(positionStats?.runningPnL || 0) >= 0 ? colors.green400 : colors.red400}`}>
-                {formatCurrency(positionStats?.runningPnL || 0)}
-              </p>
+          </section>
+        )}
+
+        {kalshiMode && (
+          <section className="mb-10">
+            <h2 className={`text-xl font-bold ${colors.text} mb-4`}>Feed status</h2>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className={`${colors.surfaceSecondary} rounded-xl p-6 border ${colors.border}`}>
+                <p className={`text-xs font-semibold ${colors.textMuted} uppercase tracking-wider mb-2`}>
+                  Selected market
+                </p>
+                <p className={`text-lg font-bold ${colors.text} break-all`}>
+                  {kalshiTickerLabel || '—'}
+                </p>
+              </div>
+              <div className={`${colors.surfaceSecondary} rounded-xl p-6 border ${colors.border}`}>
+                <p className={`text-xs font-semibold ${colors.textMuted} uppercase tracking-wider mb-2`}>
+                  Snapshots loaded
+                </p>
+                <p className={`text-2xl font-bold ${colors.text}`}>{kalshiSnapshotCount}</p>
+              </div>
+              <div className={`${colors.surfaceSecondary} rounded-xl p-6 border ${colors.border}`}>
+                <p className={`text-xs font-semibold ${colors.textMuted} uppercase tracking-wider mb-2`}>
+                  Series
+                </p>
+                <p className={`text-lg font-bold ${colors.text}`}>
+                  {kalshiMarket && typeof kalshiMarket.series_ticker === 'string'
+                    ? kalshiMarket.series_ticker
+                    : '—'}
+                </p>
+              </div>
             </div>
-            <div className={`${colors.surfaceSecondary} rounded-lg p-6 border ${colors.border}`}>
-              <p className={`text-xs font-semibold ${colors.textMuted} uppercase tracking-wider mb-2`}>Account Balance</p>
-              <p className={`text-2xl font-bold ${colors.text}`}>
-                {formatCurrency((positionStats?.initialBalance || 100000) + totalRealizedPnL)}
-              </p>
-            </div>
-          </div>
-        </section>
+          </section>
+        )}
 
         {/* Overview Section */}
         {strategy.overview && (
           <section className="mb-10">
-            <h2 className={`text-2xl font-bold ${colors.text} mb-4`}>Strategy Overview</h2>
+            <h2 className={`text-xl font-bold ${colors.text} mb-4`}>
+              {kalshiMode ? 'About this feed' : 'Strategy Overview'}
+            </h2>
             <p className={`${colors.textSecondary} leading-relaxed`}>
               {strategy.overview}
             </p>
+          </section>
+        )}
+
+        {kalshiMode && kalshiRestRows.length > 0 && (
+          <section className="mb-10">
+            <h2 className={`text-xl font-bold ${colors.text} mb-2`}>Rest of market fields</h2>
+            <p className={`text-sm ${colors.textMuted} mb-4 max-w-3xl`}>
+              Everything from Firestore except the four summary tiles on the home card. Times are
+              shown in Eastern Time (ET).
+            </p>
+            <div
+              className={`rounded-xl border ${colors.border} max-h-[min(560px,60vh)] overflow-y-auto ${colors.surfaceSecondary}`}
+            >
+              <table className="w-full text-sm">
+                <thead className={`sticky top-0 z-10 ${colors.surface} border-b ${colors.border}`}>
+                  <tr>
+                    <th
+                      className={`text-left py-3 px-4 font-semibold ${colors.textMuted} text-xs uppercase tracking-wider`}
+                    >
+                      Field
+                    </th>
+                    <th
+                      className={`text-left py-3 px-4 font-semibold ${colors.textMuted} text-xs uppercase tracking-wider`}
+                    >
+                      Value
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {kalshiRestRows.map((row) => (
+                    <tr
+                      key={row.key}
+                      className={`border-b ${colors.border} last:border-0 hover:bg-slate-100/60 dark:hover:bg-slate-800/40`}
+                    >
+                      <td className={`py-2.5 px-4 font-medium ${colors.text} align-top w-[40%]`}>
+                        {row.label}
+                      </td>
+                      <td className={`py-2.5 px-4 ${colors.text} align-top break-words`}>
+                        {row.value}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </section>
         )}
 

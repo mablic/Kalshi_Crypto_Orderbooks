@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTheme, themeConfig } from '../../theme/theme';
+import { layoutPageShellClass } from '../../theme/layout';
 import { useAuth } from '../../../lib/auth/Global_Provider';
 import { useToast } from '../../toast/Toast';
 import { signOutUser, updateUserAvatar, updateUserName } from '../../../lib/User';
@@ -156,7 +157,7 @@ const Profile = () => {
 
   return (
     <div className={`min-h-screen ${colors.background} ${colors.text}`}>
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      <div className={`${layoutPageShellClass} py-8`}>
         {/* Header Section */}
         <div className="mb-8">
           <h1 className={`text-4xl font-bold ${colors.text} mb-2`}>Profile Settings</h1>

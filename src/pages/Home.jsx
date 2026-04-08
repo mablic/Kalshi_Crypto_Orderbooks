@@ -1,287 +1,468 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useTheme, themeConfig } from '../theme/theme';
+import { layoutPageShellClass } from '../theme/layout';
 import Stock from '../components/Stock';
 import History from '../components/History';
 import Overview from '../components/Overview';
-import { getCandleData, getHistoricalTrades, getPositionStats, getAllStrategies } from '../../lib/position';
+import { KalshiSelectMenu } from '../components/KalshiSelectMenu';
+import {
+  listKalshiMarkets,
+  getKalshiMarketDoc,
+  getKalshiSnapshots,
+  snapshotsToCandleSeries,
+  getKalshiMarketHeroFields,
+  buildKalshiContractHeadline,
+  formatKalshiLocalDateTime,
+  getKalshiExpirationRaw,
+  formatStrikeTypeForUi,
+} from '../../lib/kalshi';
+import { trackEvent, AnalyticsEvent } from '../../lib/analytics';
+
+const TAB_ITEMS = [
+  { id: 'chart', label: 'Chart & depth' },
+  { id: 'history', label: 'Snapshots' },
+  { id: 'overview', label: 'Rest of info' },
+];
+
+function sortSeriesKeyList(keys) {
+  return [...keys].sort((a, b) => {
+    if (a === '' && b !== '') return 1;
+    if (b === '' && a !== '') return -1;
+    return a.localeCompare(b);
+  });
+}
 
 const Home = () => {
   const { theme } = useTheme();
   const colors = themeConfig[theme];
+
+  const [markets, setMarkets] = useState([]);
+  /** `null` until first market list is applied; then series ticker or "" if missing on doc. */
+  const [selectedSeriesKey, setSelectedSeriesKey] = useState(null);
+  const [selectedDocId, setSelectedDocId] = useState('');
+  const [marketDoc, setMarketDoc] = useState(null);
+  const [rawSnapshots, setRawSnapshots] = useState([]);
   const [candleData, setCandleData] = useState([]);
-  const [historicalTrades, setHistoricalTrades] = useState([]);
-  const [positionStats, setPositionStats] = useState(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('chart');
-  const [strategies, setStrategies] = useState([]);
-  const [selectedStrategy, setSelectedStrategy] = useState('LSTM_Strategy_A_AAPL');
 
-  // Fetch all strategies on mount
-  useEffect(() => {
-    const loadStrategies = async () => {
-      const allStrategies = await getAllStrategies();
-      setStrategies(allStrategies);
-      if (allStrategies.length > 0 && !allStrategies.find(s => s.name === selectedStrategy)) {
-        setSelectedStrategy(allStrategies[0].name);
+  const selectedTickerLabel = useMemo(() => {
+    const m = markets.find((x) => x.docId === selectedDocId);
+    return m?.ticker || selectedDocId || 'Kalshi';
+  }, [markets, selectedDocId]);
+
+  const seriesKeys = useMemo(() => {
+    const u = new Set(markets.map((m) => m.seriesTicker ?? ''));
+    return sortSeriesKeyList([...u]);
+  }, [markets]);
+
+  const seriesOptions = useMemo(
+    () =>
+      seriesKeys.map((sk) => ({
+        value: sk,
+        label: sk === '' ? 'No series ticker' : sk,
+      })),
+    [seriesKeys]
+  );
+
+  const marketsInSelectedSeries = useMemo(() => {
+    if (selectedSeriesKey === null) return [];
+    return markets.filter((m) => (m.seriesTicker ?? '') === selectedSeriesKey);
+  }, [markets, selectedSeriesKey]);
+
+  const tickerOptions = useMemo(
+    () =>
+      marketsInSelectedSeries.map((m) => ({
+        value: m.docId,
+        label: m.ticker,
+      })),
+    [marketsInSelectedSeries]
+  );
+
+  const heroFields = useMemo(() => getKalshiMarketHeroFields(marketDoc), [marketDoc]);
+
+  const contractHeadline = useMemo(
+    () => buildKalshiContractHeadline(marketDoc, heroFields),
+    [marketDoc, heroFields]
+  );
+
+  const expirationLocalLabel = useMemo(() => {
+    const raw = getKalshiExpirationRaw(marketDoc);
+    return formatKalshiLocalDateTime(raw);
+  }, [marketDoc]);
+
+  const strikeTypeLabel = useMemo(
+    () => formatStrikeTypeForUi(heroFields.strikeType, heroFields.rulesPrimary, heroFields.rulesSecondary),
+    [heroFields.strikeType, heroFields.rulesPrimary, heroFields.rulesSecondary]
+  );
+
+  const floorStrikeDisplay = useMemo(() => {
+    const n = heroFields.floorStrike;
+    if (n == null || !Number.isFinite(n)) return '';
+    const abs = Math.abs(n);
+    const opts =
+      abs >= 1
+        ? { minimumFractionDigits: 2, maximumFractionDigits: 4 }
+        : { minimumFractionDigits: 4, maximumFractionDigits: 6 };
+    return `$${n.toLocaleString('en-US', opts)}`;
+  }, [heroFields.floorStrike]);
+
+  const volumeFpDisplay = useMemo(() => {
+    const n = heroFields.volumeFp;
+    if (n == null || !Number.isFinite(n)) return '—';
+    return new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(n);
+  }, [heroFields.volumeFp]);
+
+  const loadMarkets = useCallback(async () => {
+    try {
+      const list = await listKalshiMarkets();
+      setMarkets(list);
+      if (list.length === 0) {
+        setSelectedSeriesKey(null);
+        setSelectedDocId('');
+        return;
       }
-    };
-    loadStrategies();
+      const codes = sortSeriesKeyList([...new Set(list.map((m) => m.seriesTicker ?? ''))]);
+      setSelectedSeriesKey((prev) => {
+        if (prev != null && codes.includes(prev)) return prev;
+        if (codes.includes('KXBNB15M')) return 'KXBNB15M';
+        return codes[0] ?? '';
+      });
+    } catch (e) {
+      console.error('Error loading Kalshi markets:', e);
+      setMarkets([]);
+      setSelectedSeriesKey(null);
+      setSelectedDocId('');
+    }
   }, []);
 
-  // Fetch position data for selected strategy
   useEffect(() => {
-    let isInitialLoad = true;
-    
-    const loadPositionData = async (showLoading = false) => {
+    loadMarkets();
+  }, [loadMarkets]);
+
+  useEffect(() => {
+    if (markets.length === 0 || selectedSeriesKey === null) return;
+    const list = markets.filter((m) => (m.seriesTicker ?? '') === selectedSeriesKey);
+    setSelectedDocId((prev) => {
+      if (list.some((x) => x.docId === prev)) return prev;
+      return list[0]?.docId ?? '';
+    });
+  }, [markets, selectedSeriesKey]);
+
+  useEffect(() => {
+    if (!selectedDocId) {
+      setMarketDoc(null);
+      setRawSnapshots([]);
+      setCandleData([]);
+      setLoading(false);
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    const load = async (showSpinner) => {
       try {
-        if (showLoading) {
-        setLoading(true);
+        if (showSpinner) setLoading(true);
+        const [docData, snaps] = await Promise.all([
+          getKalshiMarketDoc(selectedDocId),
+          getKalshiSnapshots(selectedDocId, 200),
+        ]);
+        if (cancelled) return;
+        setMarketDoc(docData);
+        setRawSnapshots(snaps);
+        setCandleData(snapshotsToCandleSeries(snaps));
+      } catch (e) {
+        console.error('Error loading Kalshi ticker data:', e);
+        if (!cancelled) {
+          setMarketDoc(null);
+          setRawSnapshots([]);
+          setCandleData([]);
         }
-        const candles = await getCandleData(selectedStrategy);
-        const trades = await getHistoricalTrades(selectedStrategy);
-        const stats = await getPositionStats(selectedStrategy);
-        
-        setCandleData(candles);
-        setHistoricalTrades(trades);
-        setPositionStats(stats);
-      } catch (error) {
-        console.error('Error loading position data:', error);
       } finally {
-        if (showLoading) {
-        setLoading(false);
-        }
+        if (!cancelled && showSpinner) setLoading(false);
       }
     };
-    
-    if (selectedStrategy) {
-      // Initial load with loading state
-      loadPositionData(true);
-      isInitialLoad = false;
-      
-      // Set up polling to refresh data every 1 minute (without showing loading spinner)
-      const intervalId = setInterval(() => {
-        loadPositionData(false);
-      }, 60000); // 60 seconds (1 minute)
-      
-      // Cleanup interval on unmount or strategy change
-      return () => clearInterval(intervalId);
-    }
-  }, [selectedStrategy]);
 
-  // Format currency with parentheses for negatives
-  const formatCurrency = (num) => {
-    const value = num || 0;
-    const formatted = new Intl.NumberFormat('en-US', {
-      style: 'currency',
-      currency: 'USD',
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    }).format(Math.abs(value));
-    
-    return value < 0 ? `(${formatted})` : formatted;
-  };
+    load(true);
+    const intervalId = setInterval(() => load(false), 60000);
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+    };
+  }, [selectedDocId]);
 
-  // Use realized_pnl directly from backend
-  const totalRealizedPnL = positionStats?.realizedPnL || positionStats?.realizedPnl || 0;
-  const accountBalance = (positionStats?.initialBalance || 100000) + totalRealizedPnL;
-  const pnlChange = accountBalance - (positionStats?.initialBalance || 100000);
+  useEffect(() => {
+    if (selectedSeriesKey === null) return;
+    trackEvent(AnalyticsEvent.KALSHI_SERIES_SELECTED, {
+      series_key: String(selectedSeriesKey),
+    });
+  }, [selectedSeriesKey]);
 
-  // Helper function to format strategy name for display
-  const formatStrategyName = (name) => {
-    if (!name) return '';
-    // Extract ticker if present (e.g., "LSTM_Strategy_A_AAPL" -> "LSTM Strategy A - AAPL")
-    const parts = name.split('_');
-    if (parts.length >= 3) {
-      const ticker = parts[parts.length - 1];
-      const strategy = parts.slice(0, -1).join(' ').replace(/([A-Z])/g, ' $1').trim();
-      return `${strategy} - ${ticker}`;
-    }
-    return name.replace(/_/g, ' ').trim();
-  };
+  useEffect(() => {
+    if (!selectedDocId) return;
+    trackEvent(AnalyticsEvent.KALSHI_TICKER_SELECTED, { doc_id: selectedDocId });
+  }, [selectedDocId]);
 
-  // Helper function to get short strategy name for tabs
-  const getShortStrategyName = (name) => {
-    if (!name) return '';
-    const parts = name.split('_');
-    if (parts.length >= 3) {
-      // Return something like "LSTM - AAPL" or "MLP - TSLA"
-      const ticker = parts[parts.length - 1];
-      const strategyType = parts[0]; // LSTM or MLP
-      return `${strategyType} - ${ticker}`;
-    }
-    return name.split('_')[0] || name;
-  };
+  useEffect(() => {
+    trackEvent(AnalyticsEvent.KALSHI_TAB_CHANGED, { tab_id: activeTab });
+  }, [activeTab]);
+
+  const shellCard =
+    `${colors.surface} border ${colors.border} rounded-2xl shadow-sm ring-1 ring-slate-900/5 dark:ring-white/10`;
+
+  const seriesValue = selectedSeriesKey === null ? '' : selectedSeriesKey;
 
   return (
     <div className={`min-h-screen ${colors.background}`}>
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
-        {/* Strategy Tabs - Top Navigation */}
-        {strategies.length > 0 && (
-          <div className={`mb-8 ${colors.surface} border ${colors.border} rounded-2xl p-4 shadow-xl`}>
-            <div className={`flex flex-wrap gap-2 border-b ${colors.border} pb-4 mb-4`}>
-              <span className={`text-xs font-semibold ${colors.textMuted} uppercase tracking-wide self-center mr-2`}>
-                Strategies:
-              </span>
-              {strategies.map((strategy) => (
-                <button
-                  key={strategy.name}
-                  onClick={() => setSelectedStrategy(strategy.name)}
-                  className={`px-4 py-2 rounded-lg font-semibold text-sm transition-all whitespace-nowrap ${
-                    selectedStrategy === strategy.name
-                      ? `bg-blue-500 text-white shadow-md transform scale-105`
-                      : `${colors.surfaceSecondary} ${colors.text} border ${colors.border} hover:bg-blue-50 dark:hover:bg-blue-900/20 hover:border-blue-400`
-                  }`}
+      <div className={`${layoutPageShellClass} py-8 lg:py-10`}>
+        <section className={`${shellCard} overflow-hidden mb-6 lg:mb-8`}>
+          <div className="h-1.5 bg-gradient-to-r from-blue-600 via-indigo-500 to-violet-500" aria-hidden />
+          <div className="p-6 sm:p-8 lg:p-10 space-y-8 lg:space-y-10">
+            <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+              <div className="min-w-0 flex-1 space-y-2">
+                <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-blue-600 dark:text-blue-400">
+                  Selected market
+                </p>
+                <p className={`text-sm font-semibold ${colors.textMuted}`}>{selectedTickerLabel}</p>
+                {contractHeadline ? (
+                  <h1
+                    className={`text-xl sm:text-2xl lg:text-3xl font-bold tracking-tight ${colors.text} break-words leading-snug`}
+                  >
+                    {contractHeadline}
+                  </h1>
+                ) : (
+                  <h1 className={`text-xl sm:text-2xl lg:text-3xl font-bold tracking-tight ${colors.text} break-words`}>
+                    {heroFields.title?.trim() || selectedTickerLabel}
+                  </h1>
+                )}
+              </div>
+              <div
+                className={`flex shrink-0 items-center gap-2 self-start rounded-full border px-4 py-2 text-xs font-semibold ${colors.border} ${colors.surfaceSecondary} ${colors.textMuted}`}
+              >
+                <span className="relative flex h-2 w-2" aria-hidden>
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                  <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
+                </span>
+                Live · 60s refresh
+                {loading && <span className="ml-1 text-[10px] font-medium opacity-80">(updating)</span>}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 gap-5 md:grid-cols-2 md:gap-6 lg:gap-8">
+              <KalshiSelectMenu
+                id="kalshi-series"
+                label="Series"
+                value={seriesValue}
+                options={seriesOptions}
+                onChange={setSelectedSeriesKey}
+                disabled={markets.length === 0}
+                emptyMessage="No markets in Firestore"
+                colors={colors}
+              />
+              <KalshiSelectMenu
+                id="kalshi-ticker"
+                label="Market ticker"
+                value={selectedDocId}
+                options={tickerOptions}
+                onChange={setSelectedDocId}
+                disabled={markets.length === 0 || marketsInSelectedSeries.length === 0}
+                emptyMessage="No tickers in this series"
+                colors={colors}
+              />
+            </div>
+
+            {markets.length === 0 && !loading && (
+              <p className={`text-sm ${colors.textMuted} leading-relaxed`}>
+                Run the Kalshi data feed so documents appear under the{' '}
+                <code className="rounded-md bg-slate-200/90 px-1.5 py-0.5 text-xs dark:bg-slate-700/90">
+                  kalshi
+                </code>{' '}
+                collection.
+              </p>
+            )}
+
+            <div className="flex flex-col gap-6 lg:flex-row lg:items-stretch lg:gap-8">
+              <div className="flex w-full shrink-0 lg:w-[min(100%,20rem)]">
+                <div
+                  className={`flex h-full min-h-0 w-full flex-col rounded-xl border-2 ${colors.border} ${colors.surface} px-5 py-4 shadow-sm divide-y ${colors.border}`}
                 >
-                  {getShortStrategyName(strategy.name)}
-                </button>
-              ))}
-            </div>
-            <div>
-              <h2 className={`text-2xl font-bold ${colors.text} mb-1`}>
-                {formatStrategyName(selectedStrategy)}
-              </h2>
-              <p className={`text-sm ${colors.textMuted}`}>
-                {positionStats?.ticker || 'AAPL'} Trading Strategy | Real-time Performance
-              </p>
+                  <div className="pb-3">
+                    <span
+                      className={`text-[10px] font-bold uppercase tracking-[0.14em] ${colors.textMuted}`}
+                    >
+                      Floor strike
+                    </span>
+                    <span
+                      className={`mt-1.5 block text-lg font-bold tabular-nums tracking-tight ${colors.text}`}
+                    >
+                      {floorStrikeDisplay ? (
+                        floorStrikeDisplay
+                      ) : (
+                        <span className={colors.textMuted}>—</span>
+                      )}
+                    </span>
+                  </div>
+                  <div className="py-3">
+                    <span
+                      className={`text-[10px] font-bold uppercase tracking-[0.14em] ${colors.textMuted}`}
+                    >
+                      Expires (your time)
+                    </span>
+                    <span className={`mt-1.5 block text-sm font-semibold leading-snug ${colors.text}`}>
+                      {expirationLocalLabel ? (
+                        expirationLocalLabel
+                      ) : (
+                        <span className={colors.textMuted}>—</span>
+                      )}
+                    </span>
+                  </div>
+                  <div className="py-3">
+                    <span
+                      className={`text-[10px] font-bold uppercase tracking-[0.14em] ${colors.textMuted}`}
+                    >
+                      Strike type
+                    </span>
+                    <span className={`mt-1.5 block text-sm font-semibold ${colors.text}`}>
+                      {strikeTypeLabel ? (
+                        strikeTypeLabel
+                      ) : (
+                        <span className={colors.textMuted}>—</span>
+                      )}
+                    </span>
+                  </div>
+                  <div className="pt-3">
+                    <span
+                      className={`text-[10px] font-bold uppercase tracking-[0.14em] ${colors.textMuted}`}
+                    >
+                      Volume (FP)
+                    </span>
+                    <span
+                      className={`mt-1.5 block text-lg font-bold tabular-nums tracking-tight ${colors.text}`}
+                    >
+                      {volumeFpDisplay}
+                    </span>
+                  </div>
+                  {heroFields.expirationValue ? (
+                    <div className="pt-3">
+                      <span
+                        className={`text-[10px] font-bold uppercase tracking-[0.14em] ${colors.textMuted}`}
+                      >
+                        Expiration value
+                      </span>
+                      <span
+                        className={`mt-1.5 block text-base font-semibold tabular-nums ${colors.text}`}
+                      >
+                        <span className={`mr-0.5 text-sm ${colors.textMuted}`}>$</span>
+                        {heroFields.expirationValue.replace(/^\$/, '')}
+                      </span>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+
+              <div
+                className={`flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border ${colors.border} ${colors.surface} shadow-sm`}
+              >
+                <div
+                  className={`shrink-0 border-b ${colors.border} px-5 py-3.5 sm:px-6 ${colors.surfaceSecondary}`}
+                >
+                  <h2 className={`text-xs font-bold uppercase tracking-[0.12em] ${colors.textMuted}`}>
+                    Market rules
+                  </h2>
+                  <p className={`mt-0.5 text-xs ${colors.textMuted}`}>
+                    How this contract resolves and which price index applies.
+                  </p>
+                </div>
+                <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5 sm:px-6 sm:py-6">
+                  <div className="space-y-5">
+                    <section>
+                      <h3
+                        className={`mb-2 text-[11px] font-bold uppercase tracking-wide text-blue-700 dark:text-blue-400`}
+                      >
+                        Resolution
+                      </h3>
+                      <p className={`text-sm leading-relaxed sm:text-[15px] ${colors.text}`}>
+                        {heroFields.rulesPrimary || (
+                          <span className={colors.textMuted}>No resolution rule on this market document.</span>
+                        )}
+                      </p>
+                    </section>
+                    <div className={`h-px w-full ${colors.border}`} aria-hidden />
+                    <section>
+                      <h3
+                        className={`mb-2 text-[11px] font-bold uppercase tracking-wide text-slate-600 dark:text-slate-400`}
+                      >
+                        Price data & final value
+                      </h3>
+                      <p className={`text-sm leading-relaxed sm:text-[15px] ${colors.text}`}>
+                        {heroFields.rulesSecondary || (
+                          <span className={colors.textMuted}>
+                            No price-method notes on this market document.
+                          </span>
+                        )}
+                      </p>
+                    </section>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
-        )}
+        </section>
 
-        {/* Summary Section - Base Info */}
-        <div className={`${colors.surface} border ${colors.border} rounded-2xl p-8 shadow-xl mb-8`}>
+        <nav
+          className={`mb-6 lg:mb-8 flex flex-wrap p-1 rounded-xl border ${colors.border} ${colors.surfaceSecondary} w-fit gap-0.5`}
+          aria-label="View"
+        >
+          {TAB_ITEMS.map((tab) => {
+            const active = activeTab === tab.id;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setActiveTab(tab.id)}
+                className={`
+                  px-4 sm:px-5 py-2.5 rounded-lg text-sm font-semibold transition-all duration-200
+                  ${
+                    active
+                      ? `${colors.surface} text-blue-600 dark:text-blue-400 shadow-sm border ${colors.border}`
+                      : `${colors.textMuted} hover:text-slate-800 dark:hover:text-slate-200`
+                  }
+                `}
+              >
+                {tab.label}
+              </button>
+            );
+          })}
+        </nav>
 
-          {/* Key Metrics - 3 Column Layout */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-            {/* Account Balance - Prominent */}
-            <div className={`${pnlChange >= 0 ? colors.greenLight : colors.redLight} border ${pnlChange >= 0 ? colors.greenBorder : colors.redBorder} rounded-xl p-6`}>
-              <p className={`text-xs font-semibold ${colors.textMuted} uppercase tracking-wider mb-2`}>Account Balance</p>
-              <p className={`text-4xl font-bold ${pnlChange >= 0 ? colors.green600 : colors.red600} ${pnlChange >= 0 ? colors.green400 : colors.red400} mb-2`}>
-                {formatCurrency(accountBalance)}
-              </p>
-              <p className={`text-sm ${pnlChange >= 0 ? colors.green600 : colors.red600} ${pnlChange >= 0 ? colors.green400 : colors.red400}`}>
-                {formatCurrency(pnlChange)}
-              </p>
-            </div>
+        <div className="pb-12">
+          {activeTab === 'overview' && (
+            <Overview
+              kalshiMode
+              kalshiMarket={marketDoc}
+              kalshiTickerLabel={selectedTickerLabel}
+              kalshiSnapshotCount={rawSnapshots.length}
+            />
+          )}
 
-            {/* Realized PnL - Total from all closed trades */}
-            <div className={`${colors.surfaceSecondary} rounded-xl p-6 border ${colors.border}`}>
-              <p className={`text-xs font-semibold ${colors.textMuted} uppercase tracking-wider mb-2`}>Realized PnL</p>
-              <p className={`text-3xl font-bold ${totalRealizedPnL >= 0 ? colors.green600 : colors.red600} ${totalRealizedPnL >= 0 ? colors.green400 : colors.red400}`}>
-                {formatCurrency(totalRealizedPnL)}
-              </p>
-            </div>
+          {activeTab === 'chart' && (
+            <Stock
+              kalshiMode
+              candleData={candleData}
+              positionStats={{
+                ticker: selectedTickerLabel,
+                snapshotCount: rawSnapshots.length,
+                kalshiFloorStrike: heroFields.floorStrike,
+              }}
+              loading={loading}
+              strategyName=""
+            />
+          )}
 
-            {/* Running PnL */}
-            <div className={`${colors.surfaceSecondary} rounded-xl p-6 border ${colors.border}`}>
-              <p className={`text-xs font-semibold ${colors.textMuted} uppercase tracking-wider mb-2`}>Running PnL</p>
-              <p className={`text-3xl font-bold ${(positionStats?.runningPnL || 0) >= 0 ? colors.green600 : colors.red600} ${(positionStats?.runningPnL || 0) >= 0 ? colors.green400 : colors.red400}`}>
-                {formatCurrency(positionStats?.runningPnL || 0)}
-              </p>
-            </div>
-          </div>
-
-          {/* Details Grid */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <div className={`${colors.surfaceSecondary} rounded-lg p-4`}>
-              <p className={`text-xs ${colors.textMuted} mb-2 font-medium`}>Initial Balance</p>
-              <p className={`text-lg font-bold ${colors.text}`}>
-                {formatCurrency(positionStats?.initialBalance || 100000)}
-              </p>
-            </div>
-            <div className={`${colors.surfaceSecondary} rounded-lg p-4`}>
-              <p className={`text-xs ${colors.textMuted} mb-2 font-medium`}>Trade Size</p>
-              <p className={`text-lg font-bold ${colors.text}`}>
-                {positionStats?.tradeSize || 1} shares
-              </p>
-            </div>
-            <div className={`${colors.surfaceSecondary} rounded-lg p-4`}>
-              <p className={`text-xs ${colors.textMuted} mb-2 font-medium`}>Current Position</p>
-              <p className={`text-lg font-bold ${colors.text}`}>
-                {positionStats?.currentPosition || '—'}
-              </p>
-            </div>
-            <div className={`${colors.surfaceSecondary} rounded-lg p-4`}>
-              <p className={`text-xs ${colors.textMuted} mb-2 font-medium`}>Ticker</p>
-              <p className={`text-lg font-bold ${colors.text}`}>
-                {positionStats?.ticker || 'AAPL'}
-              </p>
-            </div>
-          </div>
+          {activeTab === 'history' && (
+            <History kalshiMode kalshiSnapshots={rawSnapshots} loading={loading} />
+          )}
         </div>
-
-        {/* Content Tab Navigation */}
-        <div className={`mb-8 flex gap-4 border-b ${colors.border}`}>
-          <button
-            onClick={() => setActiveTab('chart')}
-            className={`px-4 py-2 font-semibold text-sm transition-all ${
-              activeTab === 'chart'
-                ? `border-b-2 border-blue-500 text-blue-600 dark:text-blue-400`
-                : `${colors.textMuted} hover:${colors.text}`
-            }`}
-          >
-            <svg className="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
-            </svg>
-            Chart
-          </button>
-          <button
-            onClick={() => setActiveTab('history')}
-            className={`px-4 py-2 font-semibold text-sm transition-all ${
-              activeTab === 'history'
-                ? `border-b-2 border-blue-500 text-blue-600 dark:text-blue-400`
-                : `${colors.textMuted} hover:${colors.text}`
-            }`}
-          >
-            <svg className="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            Trade History
-          </button>
-          <button
-            onClick={() => setActiveTab('overview')}
-            className={`px-4 py-2 font-semibold text-sm transition-all ${
-              activeTab === 'overview'
-                ? `border-b-2 border-blue-500 text-blue-600 dark:text-blue-400`
-                : `${colors.textMuted} hover:${colors.text}`
-            }`}
-          >
-            <svg className="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            Overview
-          </button>
-        </div>
-
-        {/* Overview Tab */}
-        {activeTab === 'overview' && (
-          <Overview 
-            strategyName={selectedStrategy}
-            historicalTrades={historicalTrades}
-            positionStats={positionStats}
-          />
-        )}
-
-        {/* Chart Tab */}
-        {activeTab === 'chart' && (
-          <Stock 
-            candleData={candleData}
-            historicalTrades={historicalTrades}
-            positionStats={positionStats}
-            loading={loading}
-            strategyName={selectedStrategy}
-          />
-        )}
-
-        {/* History Tab */}
-        {activeTab === 'history' && (
-          <History 
-            historicalTrades={historicalTrades}
-            initialBalance={positionStats?.initialBalance || 100000}
-            loading={loading}
-            positionStats={positionStats}
-            candleData={candleData}
-          />
-        )}
       </div>
     </div>
   );

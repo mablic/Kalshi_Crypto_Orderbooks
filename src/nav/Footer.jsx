@@ -1,6 +1,7 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
 import { useTheme, themeConfig } from '../theme/theme';
+import { layoutPageShellClass } from '../theme/layout';
 
 const Footer = () => {
   const { theme } = useTheme();
@@ -8,22 +9,24 @@ const Footer = () => {
 
   return (
     <footer className={`${colors.surface} border-t ${colors.border} mt-auto`}>
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
+      <div className={`${layoutPageShellClass} py-12`}>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-8 mb-8">
           {/* Brand Section */}
           <div className="col-span-1 md:col-span-2">
             <div className="flex items-center space-x-3 mb-4">
               <div className={`w-10 h-10 ${colors.accentBg} rounded-lg flex items-center justify-center`}>
-                <span className={`${colors.accentText} font-bold text-lg`}>Q</span>
+                <span className={`${colors.accentText} font-bold text-sm leading-tight`}>CO</span>
               </div>
               <div>
-                <h3 className={`text-lg font-bold ${colors.text}`}>Auto Trading</h3>
-                <p className={`text-xs ${colors.textMuted}`}>Automated Trading Platform</p>
+                <h3 className={`text-lg font-bold ${colors.text}`}>Crypto Orderbooks</h3>
+                <p className={`text-xs ${colors.textMuted}`}>Kalshi 15m crypto order-book snapshots</p>
               </div>
             </div>
-            <p className={`${colors.textMuted} text-sm leading-relaxed max-w-md`}>
-              Automated trading powered by advanced AI and machine learning algorithms. 
-              Execute trades automatically based on intelligent market analysis.
+            <p className={`${colors.textMuted} text-sm leading-relaxed max-w-2xl`}>
+              We capture recurring snapshots of Kalshi&apos;s fifteen-minute crypto markets: CF Benchmarks
+              minute index OHLC alongside full yes/no order-book ladders as stored in our feed. Explore the
+              data in the browser and download CSV bundles for your own research, visualization, or
+              backtesting workflows.
             </p>
           </div>
 
@@ -61,9 +64,10 @@ const Footer = () => {
             </svg>
             <div>
               <p className={`text-sm ${colors.textMuted} leading-relaxed`}>
-                <span className={`font-semibold ${colors.text}`}>Please Note:</span> This is not investment advice. 
-                We're here to help you better understand your portfolio through AI-powered analysis and insights. 
-                Your AI Trade Partner does not take responsibility for trading losses.
+                <span className={`font-semibold ${colors.text}`}>Please note:</span> Crypto Orderbooks is a data
+                exploration tool, not trading or investment advice. Snapshot quality and availability depend on
+                the upstream feed and your data store. You are responsible for how you use downloaded data;
+                trading involves risk of loss.
               </p>
             </div>
           </div>
@@ -73,7 +77,7 @@ const Footer = () => {
         <div className={`pt-6 border-t ${colors.border}`}>
           <div className="flex flex-col md:flex-row justify-between items-center space-y-2 md:space-y-0">
             <p className={`text-sm ${colors.textMuted}`}>
-                © {new Date().getFullYear()} AI Auto Trading. All rights reserved.
+              © {new Date().getFullYear()} Crypto Orderbooks. All rights reserved.
             </p>
           </div>
         </div>

@@ -1,6 +1,8 @@
 import React from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useTheme, themeConfig } from '../theme/theme';
+import { layoutPageShellClass } from '../theme/layout';
+import { trackEvent, AnalyticsEvent } from '../../lib/analytics';
 
 const Nav = () => {
   const { theme, toggleTheme, isDark } = useTheme();
@@ -9,20 +11,20 @@ const Nav = () => {
 
   return (
     <nav className={`${colors.surface} shadow-lg border-b ${colors.border} transition-colors duration-300`}>
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div className={layoutPageShellClass}>
         <div className="flex justify-between items-center h-16">
           {/* Logo and Brand */}
           <Link to="/" className="flex items-center space-x-3 hover:opacity-80 transition-opacity">
             <div className="flex-shrink-0">
               <img 
                 src="/assets/icon.png" 
-                alt="AI Trade Partner Logo" 
+                alt="Crypto Orderbooks" 
                 className="w-10 h-10"
               />
             </div>
             <div className="hidden md:block">
-              <h1 className={`text-xl font-bold ${colors.text}`}>Trade Partner</h1>
-              <p className={`text-xs ${colors.textMuted}`}>Your Intelligent Trading Companion</p>
+              <h1 className={`text-xl font-bold ${colors.text}`}>Crypto Orderbooks</h1>
+              <p className={`text-xs ${colors.textMuted}`}>Kalshi 15m crypto · snapshots &amp; CSV</p>
             </div>
           </Link>
 
@@ -47,8 +49,14 @@ const Nav = () => {
           {/* Right Side Actions */}
           <div className="flex items-center space-x-4">
             {/* Theme Toggle */}
-            <button 
-              onClick={toggleTheme}
+            <button
+              type="button"
+              onClick={() => {
+                trackEvent(AnalyticsEvent.THEME_CHANGED, {
+                  theme: isDark ? 'light' : 'dark',
+                });
+                toggleTheme();
+              }}
               className={`p-2 ${colors.textMuted} hover:${colors.text} focus:outline-none focus:ring-2 focus:ring-inset focus:ring-blue-500 rounded-md transition-colors duration-200`}
               title={`Switch to ${isDark ? 'light' : 'dark'} theme`}
             >

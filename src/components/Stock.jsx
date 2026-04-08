@@ -1,9 +1,252 @@
-import React, { useMemo, useState, useEffect, useRef } from 'react';
+import React, { useMemo, useState, useEffect, useRef, useCallback } from 'react';
 import { useTheme, themeConfig } from '../theme/theme';
 import { getMAParams, calculateMovingAverage } from '../../lib/position';
 import { getStrategyPeriod } from '../../lib/strategy';
+import {
+  parseOrderBookDepthRows,
+  KALSHI_DEPTH_YES_KEY,
+  KALSHI_DEPTH_NO_KEY,
+  formatKalshiInstant,
+  buildKalshiCandlesOrderBookCsv,
+} from '../../lib/kalshi';
+import { trackEvent, AnalyticsEvent } from '../../lib/analytics';
+import { closePointsToSmoothPath } from '../../lib/smoothPath';
 
-const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, loading = false, strategyName = '' }) => {
+function humanizeOrderBookKey(key) {
+  return String(key).replace(/_/g, ' ');
+}
+
+function formatDepthPrice(p) {
+  if (p >= 1) return `$${p.toFixed(2)}`;
+  return `$${p.toFixed(4)}`;
+}
+
+function formatDepthSize(n) {
+  return new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(n);
+}
+
+function DepthTable({ title, rows, colors, side }) {
+  const tone =
+    side === 'yes'
+      ? {
+          title: 'text-emerald-600 dark:text-emerald-400',
+          cell: 'text-emerald-700 dark:text-emerald-300',
+          head: 'text-emerald-800/90 dark:text-emerald-300/95',
+          bar: 'bg-emerald-500',
+          ring: 'ring-emerald-500/15',
+        }
+      : {
+          title: 'text-rose-600 dark:text-rose-400',
+          cell: 'text-rose-700 dark:text-rose-300',
+          head: 'text-rose-800/90 dark:text-rose-300/95',
+          bar: 'bg-rose-500',
+          ring: 'ring-rose-500/15',
+        };
+
+  return (
+    <div
+      className={`rounded-xl border ${colors.border} overflow-hidden flex flex-col min-h-[200px] ${colors.surface} ring-1 ${tone.ring}`}
+    >
+      <div
+        className={`px-4 py-3 border-b ${colors.border} ${colors.surfaceSecondary} flex items-center justify-between gap-2`}
+      >
+        <div className="flex items-center gap-2 min-w-0">
+          <span className={`h-7 w-1 shrink-0 rounded-full ${tone.bar}`} aria-hidden />
+          <span className={`text-sm font-bold tracking-tight ${tone.title}`}>{title}</span>
+        </div>
+        <span className={`text-xs font-medium tabular-nums ${colors.textMuted}`}>
+          {rows.length} level{rows.length === 1 ? '' : 's'}
+        </span>
+      </div>
+      <div className="overflow-y-auto max-h-[min(400px,45vh)]">
+        {rows.length === 0 ? (
+          <p className={`p-6 text-sm text-center ${colors.textMuted}`}>No contracts at this side.</p>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr className={`text-left border-b ${colors.border} ${colors.surfaceSecondary}`}>
+                <th className={`py-2.5 pl-4 pr-2 text-[11px] font-bold uppercase tracking-wider ${tone.head}`}>
+                  Price
+                </th>
+                <th
+                  className={`py-2.5 pr-4 pl-2 text-[11px] font-bold uppercase tracking-wider ${tone.head} text-right`}
+                >
+                  Contracts
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, i) => (
+                <tr
+                  key={`${side}-${i}-${r.price}`}
+                  className={`border-b ${colors.borderSecondary} last:border-0 hover:bg-slate-50/90 dark:hover:bg-slate-800/40 transition-colors`}
+                >
+                  <td className={`py-2.5 pl-4 font-mono text-sm font-semibold tabular-nums ${tone.cell}`}>
+                    {formatDepthPrice(r.price)}
+                  </td>
+                  <td className={`py-2.5 pr-4 text-right font-mono text-sm font-semibold tabular-nums ${tone.cell}`}>
+                    {formatDepthSize(r.size)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function KalshiOrderBookPanel({ orderBook, colors, snapshotLabel = '' }) {
+  const [filter, setFilter] = useState('');
+
+  const entries = useMemo(() => {
+    return orderBook && typeof orderBook === 'object' ? Object.entries(orderBook) : [];
+  }, [orderBook]);
+
+  const yesRows = useMemo(
+    () => parseOrderBookDepthRows(orderBook?.[KALSHI_DEPTH_YES_KEY]),
+    [orderBook]
+  );
+  const noRows = useMemo(
+    () => parseOrderBookDepthRows(orderBook?.[KALSHI_DEPTH_NO_KEY]),
+    [orderBook]
+  );
+
+  const otherEntries = useMemo(() => {
+    return entries.filter(
+      ([k]) => k !== KALSHI_DEPTH_YES_KEY && k !== KALSHI_DEPTH_NO_KEY
+    );
+  }, [entries]);
+
+  const filteredOther = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    if (!q) return otherEntries;
+    return otherEntries.filter(([k, v]) => {
+      const blob =
+        `${k} ${typeof v === 'object' ? JSON.stringify(v) : String(v)}`.toLowerCase();
+      return blob.includes(q);
+    });
+  }, [otherEntries, filter]);
+
+  const snapshotDisplay = useMemo(() => {
+    if (!snapshotLabel) return '';
+    if (/^\d{4}-\d{2}-\d{2}T/.test(snapshotLabel.trim())) {
+      return formatKalshiInstant(snapshotLabel.trim());
+    }
+    return snapshotLabel;
+  }, [snapshotLabel]);
+
+  const renderOtherValue = (v) => {
+    if (v === null || v === undefined) {
+      return <span className={`text-xs italic ${colors.textMuted}`}>—</span>;
+    }
+    if (typeof v === 'object') {
+      return (
+        <pre
+          className={`text-[11px] leading-relaxed whitespace-pre-wrap break-words max-h-32 overflow-auto rounded-md px-2 py-1.5 bg-slate-900/[0.04] dark:bg-white/[0.06] ${colors.text} font-mono`}
+        >
+          {JSON.stringify(v, null, 2)}
+        </pre>
+      );
+    }
+    return <span className={`text-sm font-medium ${colors.text}`}>{String(v)}</span>;
+  };
+
+  const shell =
+    `${colors.surface} border ${colors.border} rounded-2xl shadow-sm ring-1 ring-slate-900/5 dark:ring-white/10 overflow-hidden mt-8`;
+
+  if (entries.length === 0) {
+    return (
+      <div className={shell}>
+        <div className="h-0.5 bg-gradient-to-r from-slate-400 to-slate-300 dark:from-slate-600 dark:to-slate-500" />
+        <div className="p-6 sm:p-8">
+          <h3 className={`text-base font-semibold ${colors.text}`}>Order book</h3>
+          <p className={`mt-2 text-sm ${colors.textMuted} max-w-md`}>
+            No order-book fields on this snapshot. When the feed writes{' '}
+            <code className="text-xs px-1 py-0.5 rounded bg-slate-200/80 dark:bg-slate-700/80">
+              order_book
+            </code>{' '}
+            on each snapshot, depth and quotes will show here.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={shell}>
+      <div className="h-0.5 bg-gradient-to-r from-blue-600 via-indigo-500 to-violet-500" />
+      <div className="p-5 sm:p-6 lg:p-8">
+        <div className="mb-6">
+            <h3 className={`text-lg font-semibold tracking-tight ${colors.text}`}>Order book</h3>
+            <p className={`mt-1 text-sm leading-relaxed ${colors.textMuted} max-w-2xl`}>
+              Depth for the snapshot selected on the chart (highlighted column) or in the snapshot bar
+              above the price chart. Use prev/next or another time slot to change it.
+            </p>
+          {snapshotDisplay && (
+            <p className={`mt-3 text-sm ${colors.textSecondary}`}>
+              <span className={`font-medium ${colors.textMuted}`}>Snapshot · </span>
+              {snapshotDisplay}
+            </p>
+          )}
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 lg:gap-6 mb-8">
+          <DepthTable title="Yes" side="yes" rows={yesRows} colors={colors} />
+          <DepthTable title="No" side="no" rows={noRows} colors={colors} />
+        </div>
+
+        {otherEntries.length > 0 && (
+          <div className={`rounded-xl border ${colors.border} overflow-hidden`}>
+            <div
+              className={`px-4 py-3 border-b ${colors.border} ${colors.surfaceSecondary} flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3`}
+            >
+              <span className={`text-sm font-semibold ${colors.text}`}>Other snapshot fields</span>
+              <label htmlFor="ob-filter" className="sr-only">
+                Filter
+              </label>
+              <input
+                id="ob-filter"
+                type="search"
+                value={filter}
+                onChange={(e) => setFilter(e.target.value)}
+                placeholder="Filter…"
+                className={`
+                  w-full sm:max-w-xs rounded-lg border ${colors.border} ${colors.surface} ${colors.text}
+                  px-3 py-2 text-sm placeholder:text-slate-400 dark:placeholder:text-slate-500
+                  focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500
+                `}
+              />
+            </div>
+            <ul className="divide-y divide-slate-200/80 dark:divide-slate-700/80 max-h-56 overflow-y-auto">
+              {filteredOther.length === 0 ? (
+                <li className={`p-4 text-sm ${colors.textMuted}`}>No matches.</li>
+              ) : (
+                filteredOther.map(([k, v]) => (
+                  <li key={k} className="px-4 py-3 hover:bg-slate-50/80 dark:hover:bg-slate-800/30">
+                    <div className={`text-[10px] font-bold uppercase tracking-wide ${colors.textMuted}`}>
+                      {humanizeOrderBookKey(k)}
+                    </div>
+                    <div className="mt-1">{renderOtherValue(v)}</div>
+                  </li>
+                ))
+              )}
+            </ul>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const Stock = ({
+  candleData = [],
+  positionStats = null,
+  loading = false,
+  strategyName = '',
+  kalshiMode = false,
+}) => {
   const { theme } = useTheme();
   const colors = themeConfig[theme];
   const [animatingCandle, setAnimatingCandle] = useState(null);
@@ -16,11 +259,24 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
     if (!candleData || candleData.length === 0) return [];
     return candleData.slice(-MAX_CANDLES);
   }, [candleData]);
+
+  const chartTimeLocale = useMemo(
+    () => ({
+      month: 'short',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+      ...(kalshiMode ? { timeZoneName: 'short' } : {}),
+    }),
+    [kalshiMode]
+  );
   
   const [maPeriods, setMaPeriods] = useState([5, 10]);
   const [maValues, setMaValues] = useState({});
   const [hoveredCandle, setHoveredCandle] = useState(null);
-  const [hoveredTrade, setHoveredTrade] = useState(null);
+  const [, setHoveredTrade] = useState(null);
+  const [kalshiSelectedSnapId, setKalshiSelectedSnapId] = useState(null);
   const [tradingInterval, setTradingInterval] = useState('1'); // Default to 1 minute
   
   // Get MA colors from theme
@@ -28,6 +284,7 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
 
   // Extract trades from displayedCandles - handle edge cases
   const trades = useMemo(() => {
+    if (kalshiMode) return [];
     if (displayedCandles.length === 0) return [];
     
     const tradeList = [];
@@ -47,38 +304,144 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
     });
     
     return tradeList;
-  }, [displayedCandles]);
+  }, [displayedCandles, kalshiMode]);
 
-  const minPrice = displayedCandles.length > 0 ? Math.min(...displayedCandles.map(d => d.low)) - 2 : 140;
-  const maxPrice = displayedCandles.length > 0 ? Math.max(...displayedCandles.map(d => d.high)) + 2 : 200;
-  const priceRange = maxPrice - minPrice;
+  const orderBookSourceCandle = useMemo(() => {
+    if (!kalshiMode || displayedCandles.length === 0) return null;
+    if (kalshiSelectedSnapId) {
+      const found = displayedCandles.find((c) => c.snapId === kalshiSelectedSnapId);
+      if (found) return found;
+    }
+    return displayedCandles[displayedCandles.length - 1];
+  }, [kalshiMode, displayedCandles, kalshiSelectedSnapId]);
+
+  const activeOrderBook = useMemo(() => {
+    if (!kalshiMode) return null;
+    const c = orderBookSourceCandle;
+    if (c?.orderBook && typeof c.orderBook === 'object') return c.orderBook;
+    return {};
+  }, [kalshiMode, orderBookSourceCandle]);
+
+  /** Index of the candle whose order book is shown (defaults to last when selection is null). */
+  const kalshiSelectionIndex = useMemo(() => {
+    if (!kalshiMode || displayedCandles.length === 0) return -1;
+    if (kalshiSelectedSnapId) {
+      const i = displayedCandles.findIndex((c) => c.snapId === kalshiSelectedSnapId);
+      if (i >= 0) return i;
+    }
+    return displayedCandles.length - 1;
+  }, [kalshiMode, displayedCandles, kalshiSelectedSnapId]);
+
+  const stepKalshiSelection = useCallback(
+    (delta) => {
+      setKalshiSelectedSnapId((prev) => {
+        if (displayedCandles.length === 0) return prev;
+        let idx = -1;
+        if (prev) {
+          idx = displayedCandles.findIndex((c) => c.snapId === prev);
+        }
+        if (idx < 0) idx = displayedCandles.length - 1;
+        const nextIdx = Math.max(0, Math.min(displayedCandles.length - 1, idx + delta));
+        return displayedCandles[nextIdx]?.snapId ?? null;
+      });
+    },
+    [displayedCandles]
+  );
+
+  const kalshiSelectedTimeLabel = useMemo(() => {
+    if (!kalshiMode || !orderBookSourceCandle?.date) return '';
+    try {
+      return new Date(orderBookSourceCandle.date).toLocaleString('en-US', chartTimeLocale);
+    } catch {
+      return String(orderBookSourceCandle.date);
+    }
+  }, [kalshiMode, orderBookSourceCandle, chartTimeLocale]);
+
+  const kalshiStrikeNum = useMemo(() => {
+    const v = positionStats?.kalshiFloorStrike;
+    if (v == null) return null;
+    const n = typeof v === 'number' ? v : parseFloat(String(v).replace(/,/g, ''));
+    return Number.isFinite(n) ? n : null;
+  }, [positionStats?.kalshiFloorStrike]);
+
+  const { minPrice, priceRange } = useMemo(() => {
+    if (displayedCandles.length === 0) {
+      if (kalshiMode && kalshiStrikeNum != null) {
+        const pad = Math.max(Math.abs(kalshiStrikeNum) * 0.012, 0.5);
+        const mn = kalshiStrikeNum - pad;
+        const mx = kalshiStrikeNum + pad;
+        return { minPrice: mn, priceRange: Math.max(mx - mn, 1e-9) };
+      }
+      return { minPrice: 140, priceRange: 60 };
+    }
+    const lows = displayedCandles.map((d) => d.low);
+    const highs = displayedCandles.map((d) => d.high);
+    let lo = Math.min(...lows);
+    let hi = Math.max(...highs);
+    if (kalshiMode && kalshiStrikeNum != null) {
+      lo = Math.min(lo, kalshiStrikeNum);
+      hi = Math.max(hi, kalshiStrikeNum);
+    }
+    const span = hi - lo;
+
+    if (kalshiMode) {
+      if (!Number.isFinite(span) || span <= 0) {
+        const mid = kalshiStrikeNum ?? (hi || lo || 1);
+        const pad = Math.max(Math.abs(mid) * 0.002, 0.01);
+        const mn = mid - pad;
+        const mx = mid + pad;
+        return { minPrice: mn, priceRange: Math.max(mx - mn, 1e-9) };
+      }
+      const pad = Math.max(span * 0.06, span * 0.02, 1e-6);
+      const mn = lo - pad;
+      const mx = hi + pad;
+      return { minPrice: mn, priceRange: Math.max(mx - mn, 1e-9) };
+    }
+
+    const mn = lo - 2;
+    const mx = hi + 2;
+    return { minPrice: mn, priceRange: Math.max(mx - mn, 1e-9) };
+  }, [displayedCandles, kalshiMode, kalshiStrikeNum]);
+
+  const formatYAxisPrice = (price) => {
+    if (!kalshiMode) return `$${Math.round(price)}`;
+    if (priceRange < 0.5) return `$${price.toFixed(5)}`;
+    if (priceRange < 5) return `$${price.toFixed(3)}`;
+    if (priceRange < 200) return `$${price.toFixed(2)}`;
+    return `$${price.toFixed(1)}`;
+  };
 
   const chartHeight = 400;
   const padding = 40;
   
   // Calculate candle width dynamically
-  const candleWidth = useMemo(() => {
-    if (displayedCandles.length === 0) return 0;
-    return 0.6;
-  }, [displayedCandles.length]);
-  
   // Chart width - dynamic, fills available space
   const chartWidth = useMemo(() => {
     if (displayedCandles.length === 0) return 100;
-    const baseWidth = 600;
-    const scaleFactor = Math.max(0.8, Math.min(1.5, displayedCandles.length / 60));
+    const baseWidth = kalshiMode ? 1050 : 600;
+    const scaleFactor = Math.max(0.85, Math.min(1.7, displayedCandles.length / 60));
     return baseWidth * scaleFactor + padding * 2;
-  }, [displayedCandles.length]);
+  }, [displayedCandles.length, kalshiMode]);
 
   const getPriceY = (price) => {
     const normalized = (price - minPrice) / priceRange;
     return chartHeight - normalized * chartHeight + padding;
   };
 
-  const getVolumeHeight = (volume) => {
-    const maxVolume = displayedCandles.length > 0 ? Math.max(...displayedCandles.map(d => d.volume)) : 1000000;
-    return (volume / maxVolume) * 60;
-  };
+  useEffect(() => {
+    if (!kalshiMode) {
+      setKalshiSelectedSnapId(null);
+    }
+  }, [kalshiMode]);
+
+  useEffect(() => {
+    if (!kalshiMode || displayedCandles.length === 0) return;
+    setKalshiSelectedSnapId((prev) => {
+      if (!prev) return null;
+      const still = displayedCandles.some((c) => c.snapId === prev);
+      return still ? prev : null;
+    });
+  }, [kalshiMode, displayedCandles]);
 
   useEffect(() => {
     if (displayedCandles.length > 0) {
@@ -117,6 +480,11 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
 
   // Fetch MA parameters
   useEffect(() => {
+    if (kalshiMode) {
+      setMaPeriods([]);
+      setMaValues({});
+      return;
+    }
     const fetchMAParams = async () => {
       if (strategyName) {
         const periods = await getMAParams(strategyName);
@@ -124,10 +492,14 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
       }
     };
     fetchMAParams();
-  }, [strategyName]);
+  }, [strategyName, kalshiMode]);
 
   // Fetch trading interval/period
   useEffect(() => {
+    if (kalshiMode) {
+      setTradingInterval('1');
+      return;
+    }
     const fetchTradingInterval = async () => {
       if (strategyName) {
         const period = await getStrategyPeriod(strategyName);
@@ -135,10 +507,14 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
       }
     };
     fetchTradingInterval();
-  }, [strategyName]);
+  }, [strategyName, kalshiMode]);
 
   // Calculate moving averages from FULL dataset, then slice for display
   useEffect(() => {
+    if (kalshiMode) {
+      setMaValues({});
+      return;
+    }
     if (candleData.length > 0 && maPeriods.length > 0) {
       const newMaValues = {};
       maPeriods.forEach(period => {
@@ -151,7 +527,7 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
       });
       setMaValues(newMaValues);
     }
-  }, [candleData, maPeriods]);
+  }, [candleData, maPeriods, kalshiMode]);
 
   const currentPrice = displayedCandles.length > 0 ? displayedCandles[displayedCandles.length - 1].close : 0;
   const previousClose = displayedCandles.length > 1 ? displayedCandles[displayedCandles.length - 2].close : currentPrice;
@@ -207,9 +583,28 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
     return 'N/A';
   }, [strategyName, positionStats]);
 
+  const handleDownloadKalshiCsv = useCallback(() => {
+    if (!kalshiMode || !candleData?.length) return;
+    trackEvent(AnalyticsEvent.KALSHI_CSV_DOWNLOAD, {
+      ticker: String(ticker || ''),
+      row_count: candleData.length,
+    });
+    const csv = `\uFEFF${buildKalshiCandlesOrderBookCsv(candleData)}`;
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const safe = String(ticker || 'kalshi').replace(/[^\w.-]+/g, '_');
+    a.download = `${safe}_ohlc_orderbook.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }, [kalshiMode, candleData, ticker]);
+
   if (loading) {
     return (
-      <div className={`${colors.surface} border ${colors.border} rounded-2xl p-8 shadow-xl`}>
+      <div className={`${colors.surface} border ${colors.border} rounded-2xl p-4 sm:p-6 lg:p-8 shadow-xl`}>
         <div className="text-center">
           <p className={colors.textMuted}>Loading chart data...</p>
         </div>
@@ -219,7 +614,7 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
 
   if (displayedCandles.length === 0) {
     return (
-      <div className={`${colors.surface} border ${colors.border} rounded-2xl p-8 shadow-xl`}>
+      <div className={`${colors.surface} border ${colors.border} rounded-2xl p-4 sm:p-6 lg:p-8 shadow-xl`}>
         <div className="text-center">
           <p className={colors.textMuted}>No chart data available</p>
         </div>
@@ -228,7 +623,7 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
   }
 
   return (
-    <div className={`${colors.surface} border ${colors.border} rounded-2xl p-8 shadow-xl`}>
+    <div className={`${colors.surface} border ${colors.border} rounded-2xl p-4 sm:p-6 lg:p-8 shadow-xl`}>
       {/* Header Section */}
       <div className="mb-8">
         <div className="flex items-start justify-between mb-4">
@@ -237,10 +632,14 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
               {ticker}
             </h2>
             <p className={`text-sm ${colors.textMuted} mt-1`}>
-              {ticker !== 'N/A' ? `${ticker} Stock` : 'Stock'} | Last Update: Just now
+              {kalshiMode
+                ? `${ticker} | Kalshi + CF Benchmarks`
+                : `${ticker !== 'N/A' ? `${ticker} Stock` : 'Stock'} | Last Update: Just now`}
             </p>
             <p className={`text-xs ${colors.textMuted} mt-2 italic`}>
-              📊 This chart displays {tradingInterval}-minute price data. The model executes trading decisions every {tradingInterval} {parseInt(tradingInterval) === 1 ? 'minute' : 'minutes'}.
+              {kalshiMode
+                ? '📊 CF Benchmarks minute index OHLC from each Kalshi snapshot (one candle per capture).'
+                : `📊 This chart displays ${tradingInterval}-minute price data. The model executes trading decisions every ${tradingInterval} ${parseInt(tradingInterval, 10) === 1 ? 'minute' : 'minutes'}.`}
             </p>
           </div>
           <div className={`${isPositive ? colors.greenLight : colors.redLight} px-4 py-2 rounded-lg`}>
@@ -255,14 +654,36 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
       </div>
 
       {/* Chart Section */}
-      <div className="mb-6">
-        <div className={`text-sm font-semibold ${colors.textMuted}`}>
-          📊 Showing most recent {displayedCandles.length} candles ({tradingInterval}-minute {parseInt(tradingInterval) === 1 ? 'interval' : 'intervals'})
+      <div className="mb-6 space-y-2">
+        <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+          <div className={`text-sm font-semibold ${colors.textMuted}`}>
+            📊 Showing most recent {displayedCandles.length} of {candleData.length} loaded candles (
+            {tradingInterval}-minute {parseInt(tradingInterval, 10) === 1 ? 'interval' : 'intervals'})
+          </div>
+          {kalshiMode && candleData.length > 0 && (
+            <button
+              type="button"
+              onClick={handleDownloadKalshiCsv}
+              className={`shrink-0 rounded-lg border px-3 py-2 text-sm font-semibold transition ${colors.border} ${colors.surface} ${colors.text} hover:bg-slate-100/90 dark:hover:bg-slate-800/80`}
+            >
+              Download CSV
+            </button>
+          )}
         </div>
+        {kalshiMode && (
+          <p className={`text-xs ${colors.textSecondary} leading-relaxed max-w-3xl`}>
+            <span className="font-semibold text-blue-600 dark:text-blue-400">Order book:</span> one
+            snapshot per candle. Use the snapshot bar, click anywhere in a time slot (price or ticks
+            row), or ← → when the snapshot bar is focused to change the minute.{' '}
+            <span className={colors.textMuted}>
+              CSV includes all {candleData.length} loaded rows (OHLC + yes/no ladders per snapshot).
+            </span>
+          </p>
+        )}
       </div>
 
       {/* Candlestick Chart with Volume - Single unified chart */}
-      <div className={`mb-8 ${colors.surface} rounded-xl p-6 border ${colors.border}`}>
+      <div className={`mb-8 ${colors.surface} rounded-xl p-3 sm:p-4 lg:p-6 border ${colors.border}`}>
         <div className="flex gap-4">
           {/* Y-axis labels and titles */}
           <div className="flex flex-col gap-0 flex-shrink-0">
@@ -270,17 +691,19 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
               <div className={`text-xs font-bold ${colors.text} mb-2`}>Price (USD)</div>
               <div className="flex flex-col justify-between" style={{ height: chartHeight + padding }}>
                 {[1, 0.75, 0.5, 0.25, 0].map((ratio) => (
-                  <div key={`price-label-${ratio}`} className={`text-xs ${colors.textMuted} text-right pr-2 w-16`}>
-                    ${(minPrice + (maxPrice - minPrice) * ratio).toFixed(0)}
+                  <div key={`price-label-${ratio}`} className={`text-xs ${colors.textMuted} text-right pr-2 w-20`}>
+                    {formatYAxisPrice(minPrice + priceRange * ratio)}
                   </div>
                 ))}
               </div>
             </div>
             <div className="flex flex-col">
-              <div className={`text-xs font-bold ${colors.text} mb-2`}>Volume</div>
+              <div className={`text-xs font-bold ${colors.text} mb-2`}>
+                {kalshiMode ? 'Ticks' : 'Volume'}
+              </div>
               <div className="flex flex-col justify-between" style={{ height: '80px' }}>
                 {displayedCandles.length > 0 && (() => {
-                  const maxVolume = Math.max(...displayedCandles.map(d => d.volume));
+                  const maxVolume = Math.max(...displayedCandles.map((d) => d.volume), 1);
                   const formatVol = (num) => {
                     if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
                     if (num >= 1000) return (num / 1000).toFixed(0) + 'K';
@@ -298,6 +721,72 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
 
           {/* Main chart area */}
           <div className="flex-1 flex flex-col gap-2 min-w-0 relative">
+            {kalshiMode && displayedCandles.length > 0 && kalshiSelectionIndex >= 0 && (
+              <div
+                role="group"
+                aria-label="Order book snapshot"
+                tabIndex={0}
+                onKeyDown={(e) => {
+                  if (e.key === 'ArrowLeft') {
+                    e.preventDefault();
+                    stepKalshiSelection(-1);
+                  } else if (e.key === 'ArrowRight') {
+                    e.preventDefault();
+                    stepKalshiSelection(1);
+                  } else if (e.key === 'Home') {
+                    e.preventDefault();
+                    setKalshiSelectedSnapId(displayedCandles[0]?.snapId ?? null);
+                  } else if (e.key === 'End') {
+                    e.preventDefault();
+                    setKalshiSelectedSnapId(null);
+                  }
+                }}
+                className={`flex flex-wrap items-stretch gap-2 rounded-xl border ${colors.border} ${colors.surfaceSecondary} px-3 py-2.5 shadow-sm outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-slate-900`}
+              >
+                <div className="flex min-w-0 flex-1 flex-col justify-center gap-0.5 sm:flex-row sm:items-center sm:gap-3">
+                  <span
+                    className={`shrink-0 text-[11px] font-bold uppercase tracking-wider ${colors.textMuted}`}
+                  >
+                    Order book · snapshot
+                  </span>
+                  <span
+                    className={`truncate font-mono text-sm font-semibold tabular-nums ${colors.text}`}
+                    title={kalshiSelectedTimeLabel}
+                  >
+                    {kalshiSelectedTimeLabel || '—'}
+                  </span>
+                </div>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    className={`rounded-lg px-2.5 py-1.5 text-lg font-semibold leading-none transition ${colors.surface} border ${colors.border} hover:bg-slate-100/80 dark:hover:bg-slate-800/80 disabled:cursor-not-allowed disabled:opacity-40 ${colors.text}`}
+                    aria-label="Earlier snapshot"
+                    disabled={kalshiSelectionIndex <= 0}
+                    onClick={() => stepKalshiSelection(-1)}
+                  >
+                    ‹
+                  </button>
+                  <button
+                    type="button"
+                    className={`rounded-lg px-2.5 py-1.5 text-lg font-semibold leading-none transition ${colors.surface} border ${colors.border} hover:bg-slate-100/80 dark:hover:bg-slate-800/80 disabled:cursor-not-allowed disabled:opacity-40 ${colors.text}`}
+                    aria-label="Later snapshot"
+                    disabled={kalshiSelectionIndex >= displayedCandles.length - 1}
+                    onClick={() => stepKalshiSelection(1)}
+                  >
+                    ›
+                  </button>
+                  {kalshiSelectedSnapId != null && (
+                    <button
+                      type="button"
+                      className={`ml-1 rounded-lg px-3 py-1.5 text-xs font-semibold ${colors.text} border ${colors.border} bg-blue-600/10 text-blue-700 hover:bg-blue-600/15 dark:bg-blue-500/15 dark:text-blue-200 dark:hover:bg-blue-500/25`}
+                      onClick={() => setKalshiSelectedSnapId(null)}
+                    >
+                      Latest
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
             {/* MA Legend - Outside SVG for better positioning */}
             {maPeriods.length > 0 && (
               <div className="absolute top-2 right-2 z-10 flex flex-col gap-2">
@@ -340,15 +829,16 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
               </div>
             )}
 
-            <svg
-              ref={svgRef}
-              width="100%"
-              height={chartHeight + padding}
-              viewBox={`0 0 ${chartWidth * 10} ${chartHeight + padding}`}
-              preserveAspectRatio="none"
-              style={{ display: 'block' }}
-            >
-              {/* Grid lines - Subtle professional styling */}
+            <div className="relative w-full" style={{ height: chartHeight + padding }}>
+              <svg
+                ref={svgRef}
+                className="block h-full w-full"
+                width="100%"
+                height="100%"
+                viewBox={`0 0 ${chartWidth * 10} ${chartHeight + padding}`}
+                preserveAspectRatio="none"
+              >
+                {/* Grid lines - Subtle professional styling */}
               {[0, 0.25, 0.5, 0.75, 1].map((ratio) => {
                 const y = chartHeight - ratio * chartHeight + padding;
                 return (
@@ -380,19 +870,63 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
                 const wickColor = isGreen ? colors.chart.candleGreen : colors.chart.candleRed;
                 const isHovered = hoveredCandle?.index === index;
                 const bodyHeight = Math.max(bodyBottom - bodyTop, 1);
+                const isOrderBookBar =
+                  kalshiMode &&
+                  orderBookSourceCandle &&
+                  candle.snapId === orderBookSourceCandle.snapId;
+                const vbW = svgDimensions.viewBoxWidth || chartWidth * 10;
+                const pxW = svgDimensions.width || 0;
+                const minHitVb = pxW > 0 ? (40 * vbW) / pxW : 48;
+                const slotHitW = Math.max(1, candleSpacing - 2);
+                const hitW = Math.min(slotHitW, Math.max(minHitVb, candleSpacing * 0.88));
+                const hitX = padding + index * candleSpacing + (candleSpacing - hitW) / 2;
+                const plotTop = padding;
+                const plotH = chartHeight;
+                const axisY = chartHeight + padding;
+                const peNone = kalshiMode ? 'none' : undefined;
 
                 return (
                   <g
                     key={`candle-${index}`}
                     className={animatingCandle === index ? 'animate-pulse' : ''}
-                    opacity={animatingCandle === index ? 0.8 : isHovered ? 0.7 : 1}
-                    onMouseEnter={() => {
-                      setHoveredCandle({ index, x: xCenter, y: getPriceY(candle.close), candle });
-                      setHoveredTrade(null);
-                    }}
-                    onMouseLeave={() => setHoveredCandle(null)}
-                    style={{ cursor: 'pointer' }}
+                    opacity={
+                      animatingCandle === index ? 0.8 : kalshiMode ? 1 : isHovered ? 0.7 : 1
+                    }
+                    onMouseEnter={
+                      kalshiMode
+                        ? undefined
+                        : () => {
+                            setHoveredCandle({ index, x: xCenter, y: getPriceY(candle.close), candle });
+                            setHoveredTrade(null);
+                          }
+                    }
+                    onMouseLeave={kalshiMode ? undefined : () => setHoveredCandle(null)}
+                    style={{ cursor: kalshiMode ? 'default' : 'pointer' }}
                   >
+                    {kalshiMode && isOrderBookBar && (
+                      <g pointerEvents="none">
+                        <line
+                          x1={xCenter}
+                          y1={plotTop + 4}
+                          x2={xCenter}
+                          y2={axisY - 1}
+                          stroke="#3b82f6"
+                          strokeWidth={3}
+                          strokeLinecap="round"
+                          opacity={0.55}
+                        />
+                        <line
+                          x1={xCenter}
+                          y1={plotTop + 2}
+                          x2={xCenter}
+                          y2={plotTop + 10}
+                          stroke="#2563eb"
+                          strokeWidth={10}
+                          strokeLinecap="round"
+                          opacity={0.35}
+                        />
+                      </g>
+                    )}
                     {/* Wick */}
                     <line
                       x1={xCenter}
@@ -400,8 +934,9 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
                       x2={xCenter}
                       y2={wickBottom}
                       stroke={wickColor}
-                      strokeWidth={isHovered ? "2.5" : "1.5"}
+                      strokeWidth={isHovered ? '2.5' : '1.5'}
                       opacity="0.9"
+                      pointerEvents={peNone}
                     />
                     {/* Body - filled for down candles, outlined for up candles (professional style) */}
                     {isGreen ? (
@@ -414,6 +949,7 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
                         stroke={bodyColor}
                         strokeWidth="0.5"
                         opacity="1"
+                        pointerEvents={peNone}
                       />
                     ) : (
                       <rect
@@ -423,13 +959,60 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
                         height={bodyHeight}
                         fill="none"
                         stroke={bodyColor}
-                        strokeWidth={isHovered ? "2" : "1.5"}
+                        strokeWidth={isHovered ? '2' : '1.5'}
                         opacity="1"
+                        pointerEvents={peNone}
+                      />
+                    )}
+                    {kalshiMode && (
+                      <rect
+                        x={hitX}
+                        y={plotTop}
+                        width={hitW}
+                        height={plotH}
+                        fill="transparent"
+                        pointerEvents="all"
+                        style={{ cursor: 'pointer' }}
+                        onMouseEnter={() => {
+                          setHoveredCandle({ index, x: xCenter, y: getPriceY(candle.close), candle });
+                          setHoveredTrade(null);
+                        }}
+                        onMouseLeave={() => setHoveredCandle(null)}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setKalshiSelectedSnapId(candle.snapId || null);
+                        }}
                       />
                     )}
                   </g>
                 );
               })}
+
+              {/* Close-to-close smooth curve (Catmull–Rom → cubic Bézier through each close) */}
+              {displayedCandles.length > 1 &&
+                (() => {
+                  const candleSpacing = (chartWidth * 10 - padding * 2) / displayedCandles.length;
+                  const pts = displayedCandles.map((candle, index) => ({
+                    x: padding + (index + 0.5) * candleSpacing,
+                    y: getPriceY(candle.close),
+                  }));
+                  const d = closePointsToSmoothPath(pts);
+                  if (!d) return null;
+                  return (
+                    <path
+                      key="close-to-close-smooth"
+                      d={d}
+                      fill="none"
+                      stroke={colors.chart.primary}
+                      strokeWidth="2.25"
+                      opacity="0.92"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      pointerEvents="none"
+                    />
+                  );
+                })()}
 
               {/* Moving Average Lines - Professional styling */}
               {maPeriods.map((period, periodIndex) => {
@@ -466,7 +1049,7 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
               })}
 
               {/* Simple BUY/SELL indicators - dots and arrows in SVG */}
-              {trades.map((trade, tradeIndex) => {
+              {trades.map((trade) => {
                 const candleSpacing = (chartWidth * 10 - padding * 2) / displayedCandles.length;
                 const xCenter = padding + (trade.index + 0.5) * candleSpacing;
                 const candle = trade.candle || displayedCandles[trade.index];
@@ -540,6 +1123,35 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
               />
             </svg>
 
+            {kalshiMode && kalshiStrikeNum != null && (() => {
+              const yVb = getPriceY(kalshiStrikeNum);
+              if (!Number.isFinite(yVb)) return null;
+              const vbH = chartHeight + padding;
+              const topPct = (yVb / vbH) * 100;
+              const floorLabel =
+                Math.abs(kalshiStrikeNum) >= 1
+                  ? `Floor $${kalshiStrikeNum.toLocaleString('en-US', {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 4,
+                    })}`
+                  : `Floor ${formatYAxisPrice(kalshiStrikeNum)}`;
+              return (
+                <>
+                  <div
+                    className="pointer-events-none absolute left-0 right-0 z-[5] border-t-2 border-dashed border-orange-900/85 dark:border-orange-400/85"
+                    style={{ top: `${topPct}%` }}
+                    aria-hidden
+                  />
+                  <div
+                    className={`pointer-events-none absolute left-3 z-[6] rounded-md border px-2 py-1 text-sm font-semibold tabular-nums shadow-sm ${colors.surface} ${colors.border} ${colors.text}`}
+                    style={{ top: `max(6px, calc(${topPct}% - 2.25rem))` }}
+                  >
+                    {floorLabel}
+                  </div>
+                </>
+              );
+            })()}
+
             {/* BUY/SELL text labels - HTML to avoid stretching */}
             {trades.map((trade) => {
               const candleSpacing = (chartWidth * 10 - padding * 2) / displayedCandles.length;
@@ -599,6 +1211,7 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
                 </div>
               );
             })}
+            </div>
 
             {/* Tooltip for hovered candle */}
             {hoveredCandle && (
@@ -612,13 +1225,7 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
               >
                 <div className={`${colors.surface} border ${colors.border} rounded-lg px-3 py-2 shadow-xl backdrop-blur-sm`}>
                   <div className={`text-xs font-semibold ${colors.text} mb-1`}>
-                    {new Date(hoveredCandle.candle.date).toLocaleString('en-US', {
-                      month: 'short',
-                      day: '2-digit',
-                      hour: '2-digit',
-                      minute: '2-digit',
-                      hour12: false
-                    })}
+                    {new Date(hoveredCandle.candle.date).toLocaleString('en-US', chartTimeLocale)}
                   </div>
                   <div className="flex flex-col gap-0.5">
                     <div className="flex justify-between gap-3">
@@ -638,8 +1245,12 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
                       <span className={`text-xs font-medium ${colors.text}`}>${hoveredCandle.candle.close.toFixed(2)}</span>
                     </div>
                     <div className="flex justify-between gap-3">
-                      <span className={`text-xs ${colors.textMuted}`}>Volume:</span>
-                      <span className={`text-xs font-medium ${colors.text}`}>{formatNum(hoveredCandle.candle.volume)}</span>
+                      <span className={`text-xs ${colors.textMuted}`}>
+                        {kalshiMode ? 'Ticks:' : 'Volume:'}
+                      </span>
+                      <span className={`text-xs font-medium ${colors.text}`}>
+                        {formatNum(hoveredCandle.candle.volume)}
+                      </span>
                     </div>
                     {hoveredCandle.candle.trade_position && (
                       <div className="flex justify-between gap-3 mt-1 pt-1 border-t border-slate-200 dark:border-slate-700">
@@ -676,21 +1287,55 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
                 const candleSpacing = (chartWidth * 10 - padding * 2) / displayedCandles.length;
                 const xCenter = padding + (index + 0.5) * candleSpacing;
                 const barWidth = candleSpacing * 0.7;
-                const maxVolume = Math.max(...displayedCandles.map(d => d.volume));
+                const maxVolume = Math.max(...displayedCandles.map((d) => d.volume), 1);
                 const volumeHeight = (candle.volume / maxVolume) * 50;
                 const volumeY = 50 - volumeHeight;
                 const isGreen = candle.close >= candle.open;
+                const vbWv = svgDimensions.viewBoxWidth || chartWidth * 10;
+                const pxWv = svgDimensions.width || 0;
+                const minHitVbv = pxWv > 0 ? (40 * vbWv) / pxWv : 48;
+                const slotW = Math.max(1, candleSpacing - 2);
+                const volHitW = Math.min(slotW, Math.max(minHitVbv, candleSpacing * 0.88));
+                const volHitX = padding + index * candleSpacing + (candleSpacing - volHitW) / 2;
 
                 return (
-                  <rect
-                    key={`volume-${index}`}
-                    x={xCenter - barWidth / 2}
-                    y={volumeY}
-                    width={barWidth}
-                    height={volumeHeight}
-                    fill={isGreen ? colors.chart.candleGreen : colors.chart.candleRed}
-                    opacity="0.4"
-                  />
+                  <g key={`volume-${index}`}>
+                    <rect
+                      x={xCenter - barWidth / 2}
+                      y={volumeY}
+                      width={barWidth}
+                      height={volumeHeight}
+                      fill={isGreen ? colors.chart.candleGreen : colors.chart.candleRed}
+                      opacity="0.4"
+                      pointerEvents={kalshiMode ? 'none' : undefined}
+                    />
+                    {kalshiMode && (
+                      <rect
+                        x={volHitX}
+                        y={0}
+                        width={volHitW}
+                        height={80}
+                        fill="transparent"
+                        pointerEvents="all"
+                        style={{ cursor: 'pointer' }}
+                        onMouseEnter={() => {
+                          setHoveredCandle({
+                            index,
+                            x: xCenter,
+                            y: getPriceY(candle.close),
+                            candle,
+                          });
+                          setHoveredTrade(null);
+                        }}
+                        onMouseLeave={() => setHoveredCandle(null)}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setKalshiSelectedSnapId(candle.snapId || null);
+                        }}
+                      />
+                    )}
+                  </g>
                 );
               })}
             </svg>
@@ -713,13 +1358,7 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
                     const xPercent = (xPosition / (chartWidth * 10)) * 100;
                     
                     const dateObj = new Date(candle.date);
-                    const formatted = dateObj.toLocaleString('en-US', {
-                      month: 'short',
-                      day: '2-digit',
-                      hour: '2-digit',
-                      minute: '2-digit',
-                      hour12: false
-                    });
+                    const formatted = dateObj.toLocaleString('en-US', chartTimeLocale);
                     
                     return (
                       <span
@@ -740,7 +1379,7 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
                 })()}
               </div>
               <div className={`text-xs font-bold ${colors.text} text-center`}>
-                Time (CST)
+                {kalshiMode ? 'Time (local)' : 'Time (CST)'}
               </div>
             </div>
           </div>
@@ -758,7 +1397,9 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
           <p className={`text-lg font-bold ${colors.text}`}>${lowPrice.toFixed(2)}</p>
         </div>
         <div className={`${colors.surface} border ${colors.border} rounded-lg p-4`}>
-          <p className={`text-xs ${colors.textMuted} mb-1 font-medium`}>Volume</p>
+          <p className={`text-xs ${colors.textMuted} mb-1 font-medium`}>
+            {kalshiMode ? 'Tick count (sum)' : 'Volume'}
+          </p>
           <p className={`text-lg font-bold ${colors.text}`}>{formatNum(totalVolume)}</p>
         </div>
         <div className={`${colors.surface} border ${colors.border} rounded-lg p-4`}>
@@ -768,6 +1409,14 @@ const Stock = ({ candleData = [], historicalTrades = [], positionStats = null, l
           </p>
         </div>
       </div>
+
+      {kalshiMode && (
+        <KalshiOrderBookPanel
+          orderBook={activeOrderBook || {}}
+          colors={colors}
+          snapshotLabel={orderBookSourceCandle?.snapId || ''}
+        />
+      )}
     </div>
   );
 };

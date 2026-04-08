@@ -1,16 +1,58 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import { useTheme, themeConfig } from '../theme/theme';
+import { snapshotTimeIso } from '../../lib/kalshi';
 
-const History = ({ historicalTrades = [], initialBalance = 100000, loading = false, positionStats = null, candleData = [] }) => {
+const History = ({
+  historicalTrades = [],
+  loading = false,
+  positionStats = null,
+  candleData = [],
+  kalshiMode = false,
+  kalshiSnapshots = [],
+}) => {
   const { theme } = useTheme();
   const colors = themeConfig[theme];
   const [currentPage, setCurrentPage] = useState(1);
   const tradesPerPage = 20;
 
+  const kalshiRows = useMemo(() => {
+    if (!kalshiMode || !Array.isArray(kalshiSnapshots)) return [];
+    return [...kalshiSnapshots]
+      .map((s) => {
+        const cf =
+          s.cf_index_minute && typeof s.cf_index_minute === 'object'
+            ? s.cf_index_minute
+            : {};
+        const num = (v) => {
+          if (v === null || v === undefined) return null;
+          const n = typeof v === 'number' ? v : parseFloat(String(v));
+          return Number.isFinite(n) ? n : null;
+        };
+        return {
+          id: s.id,
+          time: snapshotTimeIso(s),
+          open: num(cf.open),
+          high: num(cf.high),
+          low: num(cf.low),
+          close: num(cf.close),
+          ticks: num(cf.tick_count),
+        };
+      })
+      .sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime());
+  }, [kalshiMode, kalshiSnapshots]);
+
+  const kalshiTotalPages = Math.ceil(kalshiRows.length / tradesPerPage) || 1;
+  const kalshiStart = (currentPage - 1) * tradesPerPage;
+  const kalshiPageRows = kalshiRows.slice(kalshiStart, kalshiStart + tradesPerPage);
+
+  useEffect(() => {
+    if (kalshiMode) setCurrentPage(1);
+  }, [kalshiMode, kalshiSnapshots.length]);
 
   // Pair trades (BUY followed by SELL = 1 complete trade)
   // Also identify unpaired trades as open positions
   const { pairedTrades, unpairedTrades } = useMemo(() => {
+    if (kalshiMode) return { pairedTrades: [], unpairedTrades: [] };
     if (!historicalTrades || !Array.isArray(historicalTrades) || historicalTrades.length === 0) {
       return { pairedTrades: [], unpairedTrades: [] };
     }
@@ -80,7 +122,7 @@ const History = ({ historicalTrades = [], initialBalance = 100000, loading = fal
     }
     
     return { pairedTrades: pairs, unpairedTrades: unpaired };
-  }, [historicalTrades, positionStats]);
+  }, [historicalTrades, positionStats, kalshiMode]);
 
   // Get open positions from unpaired trades and current position stats
   const openPositions = useMemo(() => {
@@ -318,8 +360,100 @@ const History = ({ historicalTrades = [], initialBalance = 100000, loading = fal
     return (
       <div className={`${colors.surface} border ${colors.border} rounded-2xl p-8 shadow-xl`}>
         <div className={`text-center py-12 ${colors.textMuted}`}>
-          Loading trade history...
+          {kalshiMode ? 'Loading snapshots…' : 'Loading trade history...'}
         </div>
+      </div>
+    );
+  }
+
+  if (kalshiMode) {
+    return (
+      <div className={`${colors.surface} border ${colors.border} rounded-2xl p-8 shadow-xl`}>
+        <div className="mb-8">
+          <h2 className={`text-3xl font-bold ${colors.text}`}>Snapshot history</h2>
+          <p className={`text-sm ${colors.textMuted} mt-1`}>
+            One row per Firestore document in <code className="text-xs">snapshots</code> (newest
+            first). OHLC from <code className="text-xs">cf_index_minute</code>.
+          </p>
+        </div>
+        {kalshiRows.length === 0 ? (
+          <div className={`text-center py-12 ${colors.textMuted}`}>No snapshots for this market.</div>
+        ) : (
+          <>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className={`border-b ${colors.border}`}>
+                    <th className={`text-left py-3 px-3 font-semibold ${colors.textMuted}`}>
+                      Doc id (UTC)
+                    </th>
+                    <th className={`text-left py-3 px-3 font-semibold ${colors.textMuted}`}>
+                      Captured
+                    </th>
+                    <th className={`text-right py-3 px-3 font-semibold ${colors.textMuted}`}>O</th>
+                    <th className={`text-right py-3 px-3 font-semibold ${colors.textMuted}`}>H</th>
+                    <th className={`text-right py-3 px-3 font-semibold ${colors.textMuted}`}>L</th>
+                    <th className={`text-right py-3 px-3 font-semibold ${colors.textMuted}`}>C</th>
+                    <th className={`text-right py-3 px-3 font-semibold ${colors.textMuted}`}>Ticks</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {kalshiPageRows.map((row) => (
+                    <tr key={row.id} className={`border-b ${colors.border}`}>
+                      <td className={`py-2 px-3 font-mono text-xs ${colors.text}`}>{row.id}</td>
+                      <td className={`py-2 px-3 ${colors.text}`}>
+                        {new Date(row.time).toLocaleString()}
+                      </td>
+                      <td className={`py-2 px-3 text-right ${colors.text}`}>
+                        {row.open != null ? row.open.toFixed(2) : '—'}
+                      </td>
+                      <td className={`py-2 px-3 text-right ${colors.text}`}>
+                        {row.high != null ? row.high.toFixed(2) : '—'}
+                      </td>
+                      <td className={`py-2 px-3 text-right ${colors.text}`}>
+                        {row.low != null ? row.low.toFixed(2) : '—'}
+                      </td>
+                      <td className={`py-2 px-3 text-right ${colors.text}`}>
+                        {row.close != null ? row.close.toFixed(2) : '—'}
+                      </td>
+                      <td className={`py-2 px-3 text-right ${colors.text}`}>
+                        {row.ticks != null ? row.ticks : '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {kalshiRows.length > tradesPerPage && (
+              <div
+                className={`mt-6 flex items-center justify-between ${colors.surfaceSecondary} rounded-lg p-4 border ${colors.border}`}
+              >
+                <span className={`text-sm ${colors.textMuted}`}>
+                  {kalshiStart + 1}–{Math.min(kalshiStart + tradesPerPage, kalshiRows.length)} of{' '}
+                  {kalshiRows.length}
+                </span>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                    disabled={currentPage <= 1}
+                    className={`px-3 py-1 rounded-lg text-sm border ${colors.border} ${colors.text}`}
+                  >
+                    Previous
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCurrentPage((p) => Math.min(kalshiTotalPages, p + 1))}
+                    disabled={currentPage >= kalshiTotalPages}
+                    className={`px-3 py-1 rounded-lg text-sm border ${colors.border} ${colors.text}`}
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+            )}
+          </>
+        )}
       </div>
     );
   }
