@@ -13,6 +13,7 @@ import {
   getKalshiMarketHeroFields,
   buildKalshiContractHeadline,
   formatKalshiLocalDateTime,
+  formatKalshiLocalDateTimeCompact,
   getKalshiExpirationRaw,
   formatStrikeTypeForUi,
 } from '../../lib/kalshi';
@@ -72,10 +73,13 @@ const Home = () => {
 
   const tickerOptions = useMemo(
     () =>
-      marketsInSelectedSeries.map((m) => ({
-        value: m.docId,
-        label: m.ticker,
-      })),
+      marketsInSelectedSeries.map((m) => {
+        const expLocal = formatKalshiLocalDateTimeCompact(getKalshiExpirationRaw(m.data));
+        return {
+          value: m.docId,
+          label: expLocal ? `${expLocal}: ${m.ticker}` : m.ticker,
+        };
+      }),
     [marketsInSelectedSeries]
   );
 

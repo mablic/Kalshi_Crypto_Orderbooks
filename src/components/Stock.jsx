@@ -676,7 +676,7 @@ const Stock = ({
             snapshot per candle. Use the snapshot bar, click anywhere in a time slot (price or ticks
             row), or ← → when the snapshot bar is focused to change the minute.{' '}
             <span className={colors.textMuted}>
-              CSV includes all {candleData.length} loaded rows (OHLC + yes/no ladders per snapshot).
+              CSV includes all {candleData.length} loaded rows (OHLC + yes_book / no_book JSON per row).
             </span>
           </p>
         )}
