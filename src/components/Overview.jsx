@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useTheme, themeConfig } from '../theme/theme';
 import { getStrategyDetails } from '../../lib/strategy';
-import { kalshiOverviewCopy, getKalshiRestFieldRows } from '../../lib/kalshi';
+import { getKalshiRestFieldRows } from '../../lib/kalshi';
 
 const Overview = ({
   strategyName = 'LSTM_Strategy_A',
@@ -80,9 +80,9 @@ const Overview = ({
   useEffect(() => {
     if (kalshiMode) {
       setStrategy({
-        title: kalshiOverviewCopy.title,
-        shortDescription: kalshiOverviewCopy.shortDescription,
-        overview: kalshiOverviewCopy.overview,
+        title: '',
+        shortDescription: '',
+        overview: null,
         modelArchitecture: null,
         ensembleVoting: null,
         modelSelection: null,
@@ -135,11 +135,12 @@ const Overview = ({
 
   return (
     <div className={`${colors.surface} border ${colors.border} rounded-2xl shadow-xl`}>
-      {/* Header */}
-      <div className={`${colors.accentBg} rounded-t-2xl p-8`}>
-        <h1 className={`text-3xl font-bold mb-3 ${colors.accentText}`}>{strategy.title || strategyName}</h1>
-        <p className={`text-lg ${colors.accentText} opacity-90`}>{strategy.shortDescription || 'Advanced Trading Strategy'}</p>
-      </div>
+      {!kalshiMode && (
+        <div className={`${colors.accentBg} rounded-t-2xl p-8`}>
+          <h1 className={`text-3xl font-bold mb-3 ${colors.accentText}`}>{strategy.title || strategyName}</h1>
+          <p className={`text-lg ${colors.accentText} opacity-90`}>{strategy.shortDescription || 'Advanced Trading Strategy'}</p>
+        </div>
+      )}
 
       <div className="p-8">
         {/* Performance Summary — trading strategies only */}

@@ -178,23 +178,49 @@ function KalshiOrderBookPanel({ orderBook, colors, snapshotLabel = '' }) {
     <div className={shell}>
       <div className="h-0.5 bg-gradient-to-r from-blue-600 via-indigo-500 to-violet-500" />
       <div className="p-5 sm:p-6 lg:p-8">
-        <div className="mb-6">
-            <h3 className={`text-lg font-semibold tracking-tight ${colors.text}`}>Order book</h3>
-            <p className={`mt-1 text-sm leading-relaxed ${colors.textMuted} max-w-2xl`}>
-              Depth for the snapshot selected on the chart (highlighted column) or in the snapshot bar
-              above the price chart. Use prev/next or another time slot to change it.
-            </p>
+        <div className="mb-6 w-full">
+          <h3 className={`text-lg font-semibold tracking-tight ${colors.text}`}>Order book</h3>
+          <p className={`mt-1 text-sm leading-relaxed ${colors.textMuted} max-w-2xl`}>
+            Depth for the snapshot selected on the chart (highlighted column) or in the snapshot bar
+            above the price chart. Use prev/next or another time slot to change it.
+          </p>
           {snapshotDisplay && (
             <p className={`mt-3 text-sm ${colors.textSecondary}`}>
               <span className={`font-medium ${colors.textMuted}`}>Snapshot · </span>
               {snapshotDisplay}
             </p>
           )}
+          <div
+            className={`mt-5 w-full rounded-xl border ${colors.border} overflow-hidden ${colors.surface} ring-1 ring-slate-900/5 dark:ring-white/10`}
+            role="note"
+            aria-label="Kalshi order book: bids only"
+          >
+            <div
+              className={`flex items-center gap-2 px-4 py-2.5 sm:px-5 border-b ${colors.border} ${colors.surfaceSecondary}`}
+            >
+              <span className="h-6 w-1 shrink-0 rounded-full bg-blue-500 dark:bg-blue-400" aria-hidden />
+              <p className={`text-[11px] font-bold uppercase tracking-wide ${colors.textMuted}`}>
+                Bid side only (Kalshi order book API)
+              </p>
+            </div>
+            <div className="px-4 py-3.5 sm:px-5 sm:py-4">
+              <p className={`text-sm leading-relaxed ${colors.text}`}>
+                These ladders show <span className="font-semibold">active bid orders</span> on the yes and no
+                sides. The API does not return asks: in a binary market, a{' '}
+                <span className="font-medium">yes bid</span> at price{' '}
+                <span className="font-mono tabular-nums text-[13px]">X</span> is the same liquidity as a{' '}
+                <span className="font-medium">no ask</span> at{' '}
+                <span className="font-mono tabular-nums text-[13px]">1 − X</span> (e.g. a $0.07 yes bid
+                matches a $0.93 no ask) with the same contract size. Levels are ordered from best to worst
+                price.
+              </p>
+            </div>
+          </div>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 lg:gap-6 mb-8">
-          <DepthTable title="Yes" side="yes" rows={yesRows} colors={colors} />
-          <DepthTable title="No" side="no" rows={noRows} colors={colors} />
+          <DepthTable title="Yes bids" side="yes" rows={yesRows} colors={colors} />
+          <DepthTable title="No bids" side="no" rows={noRows} colors={colors} />
         </div>
 
         {otherEntries.length > 0 && (
