@@ -12,6 +12,18 @@ import {
 import { trackEvent, AnalyticsEvent } from '../../lib/analytics';
 import { closePointsToSmoothPath } from '../../lib/smoothPath';
 
+/** Sample standard deviation (n − 1), same as statistics.stdev. */
+function sampleStdev(values) {
+  if (!values || values.length < 2) return null;
+  const mean = values.reduce((a, b) => a + b, 0) / values.length;
+  let s = 0;
+  for (const x of values) {
+    const d = x - mean;
+    s += d * d;
+  }
+  return Math.sqrt(s / (values.length - 1));
+}
+
 function humanizeOrderBookKey(key) {
   return String(key).replace(/_/g, ' ');
 }
@@ -23,6 +35,27 @@ function formatDepthPrice(p) {
 
 function formatDepthSize(n) {
   return new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(n);
+}
+
+/** USD string for strike / ref lines (matches floor label rules). */
+function formatUsdLinePrice(n) {
+  if (n == null || !Number.isFinite(n)) return '—';
+  if (Math.abs(n) >= 1) {
+    return `$${n.toLocaleString('en-US', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 4,
+    })}`;
+  }
+  return `$${n.toFixed(5)}`;
+}
+
+/** USD for Kalshi legend / ±1σ callouts — always exactly 2 decimal places. */
+function formatUsdTwoDecimals(n) {
+  if (n == null || !Number.isFinite(n)) return '—';
+  return `$${n.toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
 }
 
 function DepthTable({ title, rows, colors, side }) {
@@ -349,46 +382,106 @@ const Stock = ({
   }, [kalshiMode, orderBookSourceCandle]);
 
   /** Index of the candle whose order book is shown (defaults to last when selection is null). */
-  const kalshiSelectionIndex = useMemo(() => {
-    if (!kalshiMode || displayedCandles.length === 0) return -1;
-    if (kalshiSelectedSnapId) {
-      const i = displayedCandles.findIndex((c) => c.snapId === kalshiSelectedSnapId);
-      if (i >= 0) return i;
-    }
-    return displayedCandles.length - 1;
-  }, [kalshiMode, displayedCandles, kalshiSelectedSnapId]);
-
-  const stepKalshiSelection = useCallback(
-    (delta) => {
-      setKalshiSelectedSnapId((prev) => {
-        if (displayedCandles.length === 0) return prev;
-        let idx = -1;
-        if (prev) {
-          idx = displayedCandles.findIndex((c) => c.snapId === prev);
-        }
-        if (idx < 0) idx = displayedCandles.length - 1;
-        const nextIdx = Math.max(0, Math.min(displayedCandles.length - 1, idx + delta));
-        return displayedCandles[nextIdx]?.snapId ?? null;
-      });
-    },
-    [displayedCandles]
-  );
-
-  const kalshiSelectedTimeLabel = useMemo(() => {
-    if (!kalshiMode || !orderBookSourceCandle?.date) return '';
-    try {
-      return new Date(orderBookSourceCandle.date).toLocaleString('en-US', chartTimeLocale);
-    } catch {
-      return String(orderBookSourceCandle.date);
-    }
-  }, [kalshiMode, orderBookSourceCandle, chartTimeLocale]);
-
   const kalshiStrikeNum = useMemo(() => {
     const v = positionStats?.kalshiFloorStrike;
     if (v == null) return null;
     const n = typeof v === 'number' ? v : parseFloat(String(v).replace(/,/g, ''));
     return Number.isFinite(n) ? n : null;
   }, [positionStats?.kalshiFloorStrike]);
+
+  /**
+   * σ = sample stdev of **close** prices in the rolling last 15 minutes (from `candleData`).
+   * Bands: last candle close ± σ — recomputes every time `candleData` updates.
+   */
+  const { volUpperNum, volLowerNum, volSigmaClose, volSigmaDebug } = useMemo(() => {
+    const empty = {
+      volUpperNum: null,
+      volLowerNum: null,
+      volSigmaClose: null,
+      volSigmaDebug: null,
+    };
+    if (!kalshiMode || !candleData?.length) return empty;
+
+    const now = Date.now();
+    const cutoff = now - 15 * 60 * 1000;
+    const closesInWindow = [];
+    for (const row of candleData) {
+      if (!row || typeof row.date !== 'string') continue;
+      const t = Date.parse(row.date);
+      if (Number.isNaN(t) || t < cutoff) continue;
+      const c = row.close;
+      if (typeof c === 'number' && Number.isFinite(c)) closesInWindow.push(c);
+    }
+
+    const debugBase = {
+      closesInWindow: [...closesInWindow],
+      cutoffMs: cutoff,
+      nowMs: now,
+      n: closesInWindow.length,
+    };
+
+    if (closesInWindow.length < 2) {
+      return { ...empty, volSigmaDebug: { ...debugBase, note: 'need ≥2 closes in 15m window for σ' } };
+    }
+
+    const sigma = sampleStdev(closesInWindow);
+    if (sigma == null || !Number.isFinite(sigma)) {
+      return { ...empty, volSigmaDebug: { ...debugBase, note: 'sampleStdev invalid' } };
+    }
+
+    const anchor =
+      displayedCandles.length > 0
+        ? displayedCandles[displayedCandles.length - 1].close
+        : candleData[candleData.length - 1]?.close;
+    if (anchor == null || !Number.isFinite(anchor)) {
+      return { ...empty, volSigmaDebug: { ...debugBase, sigma, note: 'anchor close invalid' } };
+    }
+
+    const mean = closesInWindow.reduce((a, b) => a + b, 0) / closesInWindow.length;
+
+    return {
+      volSigmaClose: sigma,
+      volUpperNum: anchor + sigma,
+      volLowerNum: anchor - sigma,
+      volSigmaDebug: {
+        ...debugBase,
+        meanClose: mean,
+        sigma,
+        anchorClose: anchor,
+        lower1sigma: anchor - sigma,
+        upper1sigma: anchor + sigma,
+      },
+    };
+  }, [kalshiMode, candleData, displayedCandles]);
+
+  useEffect(() => {
+    if (!import.meta.env.DEV || !kalshiMode || !volSigmaDebug) return;
+    const d = volSigmaDebug;
+    console.log(
+      '[Kalshi σ] 15m window (UTC)',
+      new Date(d.cutoffMs).toISOString(),
+      '→',
+      new Date(d.nowMs).toISOString(),
+      'n=',
+      d.n
+    );
+    console.log('[Kalshi σ] closes in window (last 15m):', d.closesInWindow);
+    if (d.meanClose != null && Number.isFinite(d.sigma)) {
+      console.log(
+        '[Kalshi σ] mean(close)=',
+        d.meanClose,
+        'sample σ (n−1)=',
+        d.sigma,
+        '| anchor(last close)=',
+        d.anchorClose,
+        '| bands',
+        d.lower1sigma,
+        d.upper1sigma
+      );
+    } else if (d.note) {
+      console.log('[Kalshi σ]', d.note, d.sigma != null ? { sigma: d.sigma } : '');
+    }
+  }, [kalshiMode, volSigmaDebug]);
 
   const { minPrice, priceRange } = useMemo(() => {
     if (displayedCandles.length === 0) {
@@ -407,6 +500,10 @@ const Stock = ({
     if (kalshiMode && kalshiStrikeNum != null) {
       lo = Math.min(lo, kalshiStrikeNum);
       hi = Math.max(hi, kalshiStrikeNum);
+    }
+    if (kalshiMode && volUpperNum != null && volLowerNum != null) {
+      lo = Math.min(lo, volLowerNum);
+      hi = Math.max(hi, volUpperNum);
     }
     const span = hi - lo;
 
@@ -427,7 +524,7 @@ const Stock = ({
     const mn = lo - 2;
     const mx = hi + 2;
     return { minPrice: mn, priceRange: Math.max(mx - mn, 1e-9) };
-  }, [displayedCandles, kalshiMode, kalshiStrikeNum]);
+  }, [displayedCandles, kalshiMode, kalshiStrikeNum, volUpperNum, volLowerNum]);
 
   const formatYAxisPrice = (price) => {
     if (!kalshiMode) return `$${Math.round(price)}`;
@@ -669,8 +766,8 @@ const Stock = ({
             </p>
           </div>
           <div className={`${isPositive ? colors.greenLight : colors.redLight} px-4 py-2 rounded-lg`}>
-            <p className={`text-2xl font-bold ${isPositive ? `${colors.green600} ${colors.green400}` : `${colors.red600} ${colors.red400}`}`}>
-              ${currentPrice.toFixed(2)}
+            <p className={`text-2xl font-bold tabular-nums ${isPositive ? `${colors.green600} ${colors.green400}` : `${colors.red600} ${colors.red400}`}`}>
+              {formatUsdTwoDecimals(currentPrice)}
             </p>
             <p className={`text-sm ${isPositive ? `${colors.green600} ${colors.green400}` : `${colors.red600} ${colors.red400}`}`}>
               {formatCurrency(priceChange)} ({formatPercent(priceChangePercent)})
@@ -698,13 +795,53 @@ const Stock = ({
         </div>
         {kalshiMode && (
           <p className={`text-xs ${colors.textSecondary} leading-relaxed max-w-3xl`}>
-            <span className="font-semibold text-blue-600 dark:text-blue-400">Order book:</span> one
-            snapshot per candle. Use the snapshot bar, click anywhere in a time slot (price or ticks
-            row), or ← → when the snapshot bar is focused to change the minute.{' '}
+            <span className="font-semibold text-blue-600 dark:text-blue-400">Order book:</span> click a
+            candle (price or ticks row) to pick which snapshot’s book is shown below.{' '}
             <span className={colors.textMuted}>
               CSV includes all {candleData.length} loaded rows (OHLC + yes_book / no_book JSON per row).
             </span>
           </p>
+        )}
+        {kalshiMode && (kalshiStrikeNum != null || volSigmaClose != null) && (
+          <div
+            role="list"
+            aria-label="Price reference lines"
+            className={`flex flex-wrap items-start gap-x-5 gap-y-2 rounded-lg border px-3 py-2.5 ${colors.border} ${colors.surfaceSecondary}`}
+          >
+            {kalshiStrikeNum != null && (
+              <div className="flex min-w-0 items-center gap-2" role="listitem">
+                <span
+                  className="inline-block w-9 shrink-0 border-t-2 border-dashed border-orange-600 dark:border-orange-400"
+                  aria-hidden
+                />
+                <span className={`text-xs font-semibold tabular-nums ${colors.text}`}>
+                  Floor strike {formatUsdTwoDecimals(kalshiStrikeNum)}
+                </span>
+              </div>
+            )}
+            {volSigmaClose != null && volUpperNum != null && volLowerNum != null && (
+              <>
+                <div className="flex min-w-0 items-center gap-2" role="listitem">
+                  <span
+                    className="inline-block w-9 shrink-0 border-t-2 border-dashed border-slate-500 dark:border-slate-400"
+                    aria-hidden
+                  />
+                  <span className={`text-xs font-semibold tabular-nums ${colors.text}`}>
+                    {`+1σ ${formatUsdTwoDecimals(volUpperNum)} · σ $${volSigmaClose.toFixed(2)} (15m stdev of closes)`}
+                  </span>
+                </div>
+                <div className="flex min-w-0 items-center gap-2" role="listitem">
+                  <span
+                    className="inline-block w-9 shrink-0 border-t-2 border-dashed border-slate-500 dark:border-slate-400"
+                    aria-hidden
+                  />
+                  <span className={`text-xs font-semibold tabular-nums ${colors.text}`}>
+                    {`−1σ ${formatUsdTwoDecimals(volLowerNum)} · σ $${volSigmaClose.toFixed(2)} (15m stdev of closes)`}
+                  </span>
+                </div>
+              </>
+            )}
+          </div>
         )}
       </div>
 
@@ -747,72 +884,6 @@ const Stock = ({
 
           {/* Main chart area */}
           <div className="flex-1 flex flex-col gap-2 min-w-0 relative">
-            {kalshiMode && displayedCandles.length > 0 && kalshiSelectionIndex >= 0 && (
-              <div
-                role="group"
-                aria-label="Order book snapshot"
-                tabIndex={0}
-                onKeyDown={(e) => {
-                  if (e.key === 'ArrowLeft') {
-                    e.preventDefault();
-                    stepKalshiSelection(-1);
-                  } else if (e.key === 'ArrowRight') {
-                    e.preventDefault();
-                    stepKalshiSelection(1);
-                  } else if (e.key === 'Home') {
-                    e.preventDefault();
-                    setKalshiSelectedSnapId(displayedCandles[0]?.snapId ?? null);
-                  } else if (e.key === 'End') {
-                    e.preventDefault();
-                    setKalshiSelectedSnapId(null);
-                  }
-                }}
-                className={`flex flex-wrap items-stretch gap-2 rounded-xl border ${colors.border} ${colors.surfaceSecondary} px-3 py-2.5 shadow-sm outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-slate-900`}
-              >
-                <div className="flex min-w-0 flex-1 flex-col justify-center gap-0.5 sm:flex-row sm:items-center sm:gap-3">
-                  <span
-                    className={`shrink-0 text-[11px] font-bold uppercase tracking-wider ${colors.textMuted}`}
-                  >
-                    Order book · snapshot
-                  </span>
-                  <span
-                    className={`truncate font-mono text-sm font-semibold tabular-nums ${colors.text}`}
-                    title={kalshiSelectedTimeLabel}
-                  >
-                    {kalshiSelectedTimeLabel || '—'}
-                  </span>
-                </div>
-                <div className="flex items-center gap-1">
-                  <button
-                    type="button"
-                    className={`rounded-lg px-2.5 py-1.5 text-lg font-semibold leading-none transition ${colors.surface} border ${colors.border} hover:bg-slate-100/80 dark:hover:bg-slate-800/80 disabled:cursor-not-allowed disabled:opacity-40 ${colors.text}`}
-                    aria-label="Earlier snapshot"
-                    disabled={kalshiSelectionIndex <= 0}
-                    onClick={() => stepKalshiSelection(-1)}
-                  >
-                    ‹
-                  </button>
-                  <button
-                    type="button"
-                    className={`rounded-lg px-2.5 py-1.5 text-lg font-semibold leading-none transition ${colors.surface} border ${colors.border} hover:bg-slate-100/80 dark:hover:bg-slate-800/80 disabled:cursor-not-allowed disabled:opacity-40 ${colors.text}`}
-                    aria-label="Later snapshot"
-                    disabled={kalshiSelectionIndex >= displayedCandles.length - 1}
-                    onClick={() => stepKalshiSelection(1)}
-                  >
-                    ›
-                  </button>
-                  {kalshiSelectedSnapId != null && (
-                    <button
-                      type="button"
-                      className={`ml-1 rounded-lg px-3 py-1.5 text-xs font-semibold ${colors.text} border ${colors.border} bg-blue-600/10 text-blue-700 hover:bg-blue-600/15 dark:bg-blue-500/15 dark:text-blue-200 dark:hover:bg-blue-500/25`}
-                      onClick={() => setKalshiSelectedSnapId(null)}
-                    >
-                      Latest
-                    </button>
-                  )}
-                </div>
-              </div>
-            )}
             {/* MA Legend - Outside SVG for better positioning */}
             {maPeriods.length > 0 && (
               <div className="absolute top-2 right-2 z-10 flex flex-col gap-2">
@@ -844,8 +915,8 @@ const Stock = ({
                           <span className={`text-xs font-medium whitespace-nowrap`} style={{ color }}>
                             MA{period}
                           </span>
-                          <span className={`text-xs ${colors.textMuted} whitespace-nowrap`}>
-                            ${lastValidValue.toFixed(2)}
+                          <span className={`text-xs tabular-nums ${colors.textMuted} whitespace-nowrap`}>
+                            {formatUsdTwoDecimals(lastValidValue)}
                           </span>
                         </div>
                       );
@@ -1154,25 +1225,62 @@ const Stock = ({
               if (!Number.isFinite(yVb)) return null;
               const vbH = chartHeight + padding;
               const topPct = (yVb / vbH) * 100;
-              const floorLabel =
-                Math.abs(kalshiStrikeNum) >= 1
-                  ? `Floor $${kalshiStrikeNum.toLocaleString('en-US', {
-                      minimumFractionDigits: 2,
-                      maximumFractionDigits: 4,
-                    })}`
-                  : `Floor ${formatYAxisPrice(kalshiStrikeNum)}`;
               return (
                 <>
                   <div
-                    className="pointer-events-none absolute left-0 right-0 z-[5] border-t-2 border-dashed border-orange-900/85 dark:border-orange-400/85"
+                    className="pointer-events-none absolute left-0 right-0 z-[5] border-t-2 border-dashed border-orange-600/90 dark:border-orange-400/90"
                     style={{ top: `${topPct}%` }}
                     aria-hidden
                   />
                   <div
-                    className={`pointer-events-none absolute left-3 z-[6] rounded-md border px-2 py-1 text-sm font-semibold tabular-nums shadow-sm ${colors.surface} ${colors.border} ${colors.text}`}
+                    className={`pointer-events-none absolute left-3 z-[6] max-w-[min(96vw,28rem)] rounded-md border px-2 py-1 text-xs font-semibold tabular-nums shadow-sm ${colors.surface} ${colors.border} ${colors.text}`}
                     style={{ top: `max(6px, calc(${topPct}% - 2.25rem))` }}
                   >
-                    {floorLabel}
+                    Floor strike {formatUsdTwoDecimals(kalshiStrikeNum)}
+                  </div>
+                </>
+              );
+            })()}
+
+            {kalshiMode && volUpperNum != null && volSigmaClose != null && (() => {
+              const yVb = getPriceY(volUpperNum);
+              if (!Number.isFinite(yVb)) return null;
+              const vbH = chartHeight + padding;
+              const topPct = (yVb / vbH) * 100;
+              return (
+                <>
+                  <div
+                    className="pointer-events-none absolute left-0 right-0 z-[4] border-t-2 border-dashed border-slate-500/90 dark:border-slate-400/90"
+                    style={{ top: `${topPct}%` }}
+                    aria-hidden
+                  />
+                  <div
+                    className={`pointer-events-none absolute left-3 z-[6] max-w-[min(96vw,28rem)] rounded-md border px-2 py-1 text-xs font-semibold tabular-nums shadow-sm ${colors.surface} ${colors.border} ${colors.text}`}
+                    style={{ top: `max(6px, calc(${topPct}% - 2.25rem))` }}
+                  >
+                    {`+1σ ${formatUsdTwoDecimals(volUpperNum)} · σ $${volSigmaClose.toFixed(2)} (15m stdev of closes)`}
+                  </div>
+                </>
+              );
+            })()}
+
+            {kalshiMode && volLowerNum != null && volSigmaClose != null && (() => {
+              const yVb = getPriceY(volLowerNum);
+              if (!Number.isFinite(yVb)) return null;
+              const vbH = chartHeight + padding;
+              const topPct = (yVb / vbH) * 100;
+              return (
+                <>
+                  <div
+                    className="pointer-events-none absolute left-0 right-0 z-[4] border-t-2 border-dashed border-slate-500/90 dark:border-slate-400/90"
+                    style={{ top: `${topPct}%` }}
+                    aria-hidden
+                  />
+                  <div
+                    className={`pointer-events-none absolute left-3 z-[6] max-w-[min(96vw,28rem)] rounded-md border px-2 py-1 text-xs font-semibold tabular-nums shadow-sm ${colors.surface} ${colors.border} ${colors.text}`}
+                    style={{ top: `max(6px, calc(${topPct}% - 2.25rem))` }}
+                  >
+                    {`−1σ ${formatUsdTwoDecimals(volLowerNum)} · σ $${volSigmaClose.toFixed(2)} (15m stdev of closes)`}
                   </div>
                 </>
               );
@@ -1256,19 +1364,19 @@ const Stock = ({
                   <div className="flex flex-col gap-0.5">
                     <div className="flex justify-between gap-3">
                       <span className={`text-xs ${colors.textMuted}`}>Open:</span>
-                      <span className={`text-xs font-medium ${colors.text}`}>${hoveredCandle.candle.open.toFixed(2)}</span>
+                      <span className={`text-xs font-medium tabular-nums ${colors.text}`}>{formatUsdTwoDecimals(hoveredCandle.candle.open)}</span>
                     </div>
                     <div className="flex justify-between gap-3">
                       <span className={`text-xs ${colors.textMuted}`}>High:</span>
-                      <span className={`text-xs font-medium ${colors.text}`}>${hoveredCandle.candle.high.toFixed(2)}</span>
+                      <span className={`text-xs font-medium tabular-nums ${colors.text}`}>{formatUsdTwoDecimals(hoveredCandle.candle.high)}</span>
                     </div>
                     <div className="flex justify-between gap-3">
                       <span className={`text-xs ${colors.textMuted}`}>Low:</span>
-                      <span className={`text-xs font-medium ${colors.text}`}>${hoveredCandle.candle.low.toFixed(2)}</span>
+                      <span className={`text-xs font-medium tabular-nums ${colors.text}`}>{formatUsdTwoDecimals(hoveredCandle.candle.low)}</span>
                     </div>
                     <div className="flex justify-between gap-3">
                       <span className={`text-xs ${colors.textMuted}`}>Close:</span>
-                      <span className={`text-xs font-medium ${colors.text}`}>${hoveredCandle.candle.close.toFixed(2)}</span>
+                      <span className={`text-xs font-medium tabular-nums ${colors.text}`}>{formatUsdTwoDecimals(hoveredCandle.candle.close)}</span>
                     </div>
                     <div className="flex justify-between gap-3">
                       <span className={`text-xs ${colors.textMuted}`}>
@@ -1413,14 +1521,18 @@ const Stock = ({
       </div>
 
       {/* Chart Stats */}
-      <div className="mb-8 grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div
+        className={`mb-8 grid grid-cols-2 gap-4 ${
+          kalshiMode && volSigmaClose != null ? 'md:grid-cols-5' : 'md:grid-cols-4'
+        }`}
+      >
         <div className={`${colors.surface} border ${colors.border} rounded-lg p-4`}>
           <p className={`text-xs ${colors.textMuted} mb-1 font-medium`}>High</p>
-          <p className={`text-lg font-bold ${colors.text}`}>${highPrice.toFixed(2)}</p>
+          <p className={`text-lg font-bold tabular-nums ${colors.text}`}>{formatUsdTwoDecimals(highPrice)}</p>
         </div>
         <div className={`${colors.surface} border ${colors.border} rounded-lg p-4`}>
           <p className={`text-xs ${colors.textMuted} mb-1 font-medium`}>Low</p>
-          <p className={`text-lg font-bold ${colors.text}`}>${lowPrice.toFixed(2)}</p>
+          <p className={`text-lg font-bold tabular-nums ${colors.text}`}>{formatUsdTwoDecimals(lowPrice)}</p>
         </div>
         <div className={`${colors.surface} border ${colors.border} rounded-lg p-4`}>
           <p className={`text-xs ${colors.textMuted} mb-1 font-medium`}>
@@ -1434,6 +1546,12 @@ const Stock = ({
             {formatPercent(priceChangePercent)}
           </p>
         </div>
+        {kalshiMode && volSigmaClose != null && (
+          <div className={`${colors.surface} border ${colors.border} rounded-lg p-4`}>
+            <p className={`text-xs ${colors.textMuted} mb-1 font-medium`}>Volatility (15m)</p>
+            <p className={`text-lg font-bold tabular-nums ${colors.text}`}>{formatUsdTwoDecimals(volSigmaClose)}</p>
+          </div>
+        )}
       </div>
 
       {kalshiMode && (

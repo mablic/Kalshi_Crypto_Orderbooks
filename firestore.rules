@@ -20,6 +20,12 @@ service cloud.firestore {
       }
     }
 
+    // CF index OHLC bars by series + UTC day (written by Admin SDK; web read-only)
+    match /crypto/{docId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
     // Legacy trading dashboard (unchanged pattern: client read-only)
     match /positions/{strategyId} {
       allow read: if true;
